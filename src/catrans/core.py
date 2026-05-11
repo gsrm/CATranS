@@ -20,11 +20,13 @@ print(logger)
 
 # Functions
 # Using instructions in: https://pydeseq2.readthedocs.io/en/stable/auto_examples/plot_step_by_step.html#sphx-glr-auto-examples-plot-step-by-step-py
-def _diffExpAnalysis(data:pd.DataFrame,
-                    classification:pd.DataFrame,
-                    n_cpus:int = 8,
-                    verbose = False,
-                    design = '~class'):
+def _diffExpAnalysis(
+    data: pd.DataFrame,
+    classification: pd.DataFrame,
+    n_cpus: int = 8,
+    verbose: bool = False,
+    design: str = '~class'
+    ) -> tuple[int, pd.DataFrame]:
     """
     Run differential expression analysis using DESeq2-like workflow.
 
@@ -101,13 +103,18 @@ def _diffExpAnalysis(data:pd.DataFrame,
     logger.info("Differential Expression Analysis was successfully performed.")
 
     # Results
+    logging.info(f"Differential Expression Analysis results:\n{ds.summary()}") # NOTE: It is possible that I will change this to debug level
+
     ds.summary() # NOTE: where does this goes?
     dea_res = ds.results_df
     degs = dea_res.query('padj < 0.05').shape[0]
 
     return degs, dea_res
 
-def _corr_loop(mytupleindex:tuple[pd.DataFrame,str,str]) -> pd.DataFrame:
+
+def _corr_loop(
+    mytupleindex: tuple[pd.DataFrame,int,int]
+    ) -> pd.DataFrame:
     """
     Helper for parallel correlation computation between two genes.
 
@@ -128,17 +135,19 @@ def _corr_loop(mytupleindex:tuple[pd.DataFrame,str,str]) -> pd.DataFrame:
         'R': [res.statistic],
         'p_value': [res.pvalue]
         })
+    # logger.debug(f"i: {i}; j: {j}")
+    # logger.debug(f"res2:\n{res2.to_markdown()}")
     return res2
 
 
 def _semisupervised_model(
-        data:pd.DataFrame,
-        data_raw:pd.DataFrame,
-        signature:list,
-        acute_classification:pd.DataFrame,
-        models:list,
-        threshold:float,
-        design:str = 'class') -> tuple[pd.DataFrame, list[pd.DataFrame], list[int]]:
+        data: pd.DataFrame,
+        data_raw: pd.DataFrame,
+        signature: list,
+        acute_classification: pd.DataFrame,
+        models: list,
+        threshold: float,
+        design: str = 'class') -> tuple[pd.DataFrame, list[pd.DataFrame], list[int]]:
     """
     Run an iterative semi-supervised model to relabel samples and re-run DE analysis.
 
@@ -273,7 +282,7 @@ def _get_normalized_batch_corrected(
     design_factor: str = "condition", # será class, no?
     batch_col: str = "batch",
     log_transform: bool = True,
-) -> pd.DataFrame | Any:
+    ) -> pd.DataFrame | Any:
     """
     Normalize and batch-correct count data for downstream modeling.
 
@@ -333,14 +342,16 @@ def _get_normalized_batch_corrected(
 
     return normed_counts
 
+pd.DataFrame()
 
-
-def correlation_based_feature_selection(data:pd.DataFrame,
-                acute_classification:pd.DataFrame,
-                pval:float=0.05,
-                cutoff_corr:float=0.5,
-                cutoff_corr_genes:float=0.8,
-                verbose:bool=False):
+def correlation_based_feature_selection(
+    data: pd.DataFrame,
+    acute_classification: pd.DataFrame,
+    pval: float=0.05,
+    cutoff_corr: float | None = None,
+    cutoff_corr_genes: float | None = None,
+    verbose: bool=False
+    ) -> pd.DataFrame:
     """
     Find gene-gene correlation and select representative features.
 
@@ -362,20 +373,22 @@ def correlation_based_feature_selection(data:pd.DataFrame,
 
     _setup_internal_logger(verbose)
 
-    # NOTE IMORTANT: THIS FUNCTION DOESN'T ACTUALLY PERFORM ANY FEATURE SELECTION, THIS ONLY GIVES AWAY THE DATAFRAME FOR CORRELATIONS. CHANGE PLS
+    # NOTE IMORTANT: THIS FUNCTION DOESN'T ACTUALLY PERFORM ANY FEATURE SELECTION, I BELIEVE THIS ONLY GIVES AWAY THE DATAFRAME FOR CORRELATIONS. CHANGE PLS
     logger.info("Initializing Correlation-Based Feature Learning")
-    logger.debug("Por qué no está moviendo esto?")
     dat_c = data.loc[:, acute_classification['sample']]
 
     corr1 = pd.DataFrame()
-    
+
+
+    logger.info("Performing correlation between Acute classification and genes expression")
     for i in range(0,dat_c.shape[0]):
         res = sc.spearmanr(dat_c.iloc[i,:], acute_classification.loc[:,'class'])
         res2 = pd.DataFrame.from_dict({'R': [res.statistic], 'p_value': [res.pvalue]})
         corr1 = pd.concat([corr1, res2])
-    
     corr1.index = dat_c.index
-    corr1['Genes'] = corr1.index
+    corr1['Genes'] = corr1.index # NOTE: is this necessary?
+    logger.debug(f"corr1:\n{corr1.to_markdown()}")
+
 
     corr_genes = corr1[abs(corr1['R'])>=cutoff_corr].index.to_list()
 
@@ -389,20 +402,22 @@ def correlation_based_feature_selection(data:pd.DataFrame,
     
         corr_genes = corr1[corr1['p_value']<=pval].index.to_list()
 
+    # NOTE: If corr_genes are 0 the next steps will fail. Check for early stop.
     subdat = data.loc[corr_genes,:]
     # NOTE: I believe this would repeat combinations. If so TODO: fix with itertools
     index_loop = []
     for i in range(0,subdat.shape[0]):
         for j in range(i+1, subdat.shape[0]):
-            logger.debug(f"Correlation loop iteration; i: {i}; j: {j}")
-            logger.debug(f"Subdat:\n{subdat}")
-            index_loop.append((subdat,i,j))
-    
+            logger.debug(f"Combinations: i: {i}; j: {j}")
+            # logger.debug(f"Subdat:\n{subdat}")
+            index_loop.append((subdat,i,j)) # NOTE: this subdat stays the same for all iterations, and it is kept on memory for each iteration. TODO: Optimize
+    logger.info("Performing Gene to Gene correlation for Feature Selection")
     with Pool() as pool:
         results = pool.map(_corr_loop, index_loop)
 
     corr2 = pd.concat(results)
-
+    logger.debug(f"correlations Gene to Gene Results:\n{corr2.to_markdown()}")
+    # NOTE: is igraph necessary for this calculation?
     g = ig.Graph.TupleList(corr2[(corr2['p_value']<pval) & (abs(corr2['R'])>cutoff_corr_genes)].loc[:, ['Gene1', "Gene2"]].itertuples(index=False))
     components = g.connected_components(mode='weak')
 
@@ -411,14 +426,18 @@ def correlation_based_feature_selection(data:pd.DataFrame,
     selected_genes = []
 
     for i in set(toselection['membership']):
+        logger.debug(f"Graph membership")
+        logger.debug(f"i: {i}")
         values = toselection.loc[toselection['membership'] == i]
         values['R_abs'] = np.abs(values['R'])
         selected_genes.append(values.iloc[pd.Series(values['R_abs'].tolist()).idxmax(), :].name)
     
-    remove_genes = [gene for gene in toselection.index.to_list() if gene not in selected_genes] # NOTE: Not used
+    remove_genes = [gene for gene in toselection.index.to_list() if gene not in selected_genes]
 
-    corr1_final = corr1.query('Genes not in @remove_genes and p_value <= 0.05')
+    corr1_final = corr1.loc[(~corr1['Genes'].isin(remove_genes)) & (corr1['p_value'] <= 0.05)] # NOTE: hardcoded 0.05 pvalue threshold?
+    # corr1_final = corr1.query('Genes not in @remove_genes and p_value <= 0.05')
     corr1_final['R_abs'] = np.abs(corr1_final.loc[:,'R'])
+    logger.info(f"Number of genes selected: {len(corr1_final)}")
     
     return corr1_final
 
@@ -428,11 +447,11 @@ def run_catrans(
         raw_counts: pd.DataFrame,
         metadata: pd.DataFrame,
         batch_col: str, # TODO: Review if it could accept more than a single string (should perform dimension reduction if so)
-        signature_genes: list[str],
         acute_classification: pd.DataFrame,
         models: list[Any],
         model_threshold: float = 0.8,
         n_cpus: int = 8,
+        signature_genes: list[str] | None = None,
         verbose: bool = False
     ) -> Any:
 
