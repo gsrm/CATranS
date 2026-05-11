@@ -16,6 +16,7 @@ import logging
 from catrans._logging import _get_logger, _setup_internal_logger
 
 logger = _get_logger()
+print(logger)
 
 # Functions
 # Using instructions in: https://pydeseq2.readthedocs.io/en/stable/auto_examples/plot_step_by_step.html#sphx-glr-auto-examples-plot-step-by-step-py
@@ -362,7 +363,8 @@ def correlation_based_feature_selection(data:pd.DataFrame,
     _setup_internal_logger(verbose)
 
     # NOTE IMORTANT: THIS FUNCTION DOESN'T ACTUALLY PERFORM ANY FEATURE SELECTION, THIS ONLY GIVES AWAY THE DATAFRAME FOR CORRELATIONS. CHANGE PLS
-    
+    logger.info("Initializing Correlation-Based Feature Learning")
+    logger.debug("Por qué no está moviendo esto?")
     dat_c = data.loc[:, acute_classification['sample']]
 
     corr1 = pd.DataFrame()
@@ -392,6 +394,8 @@ def correlation_based_feature_selection(data:pd.DataFrame,
     index_loop = []
     for i in range(0,subdat.shape[0]):
         for j in range(i+1, subdat.shape[0]):
+            logger.debug(f"Correlation loop iteration; i: {i}; j: {j}")
+            logger.debug(f"Subdat:\n{subdat}")
             index_loop.append((subdat,i,j))
     
     with Pool() as pool:
@@ -414,7 +418,7 @@ def correlation_based_feature_selection(data:pd.DataFrame,
     remove_genes = [gene for gene in toselection.index.to_list() if gene not in selected_genes] # NOTE: Not used
 
     corr1_final = corr1.query('Genes not in @remove_genes and p_value <= 0.05')
-    corr1_final['R_abs'] = np.abs(corr1_final['R'])
+    corr1_final['R_abs'] = np.abs(corr1_final.loc[:,'R'])
     
     return corr1_final
 
