@@ -1,4 +1,5 @@
 # Load dependencies
+from narwhals import corr
 import pandas as pd 
 import statistics as st
 import numpy as np
@@ -16,7 +17,6 @@ import logging
 from catrans._logging import _get_logger, _setup_internal_logger
 
 logger = _get_logger()
-print(logger)
 
 # Functions
 # Using instructions in: https://pydeseq2.readthedocs.io/en/stable/auto_examples/plot_step_by_step.html#sphx-glr-auto-examples-plot-step-by-step-py
@@ -143,9 +143,9 @@ def _corr_loop(
 def _semisupervised_model(
         data: pd.DataFrame,
         data_raw: pd.DataFrame,
-        signature: list,
+        signature: list[str],
         acute_classification: pd.DataFrame,
-        models: list,
+        models: list[Any],
         threshold: float,
         design: str = 'class') -> tuple[pd.DataFrame, list[pd.DataFrame], list[int]]:
     """
@@ -315,7 +315,8 @@ def _get_normalized_batch_corrected(
     # pycombat expects (genes x samples)
     batch = metadata_df[batch_col].tolist()
     corrected = pycombat_seq(counts_df, batch)
-    
+    # TODO: Review corrected object to see what is it.
+    # NOTE: It should be possible to normalize without using a batch column.
 
     # TODO: change number of CPUs for a parameter input ?
     inference = DefaultInference(n_cpus=1) 
@@ -326,6 +327,7 @@ def _get_normalized_batch_corrected(
         inference=inference,
         # quiet=True
     )
+    logger.debug(f"Corrected counts: \n{corrected}")
 
     dds.fit_size_factors()
 
@@ -342,7 +344,6 @@ def _get_normalized_batch_corrected(
 
     return normed_counts
 
-pd.DataFrame()
 
 def correlation_based_feature_selection(
     data: pd.DataFrame,
@@ -351,7 +352,7 @@ def correlation_based_feature_selection(
     cutoff_corr: float | None = None,
     cutoff_corr_genes: float | None = None,
     verbose: bool=False
-    ) -> pd.DataFrame:
+    ) -> pd.DataFrame | None:
     """
     Find gene-gene correlation and select representative features.
 
@@ -373,71 +374,106 @@ def correlation_based_feature_selection(
 
     _setup_internal_logger(verbose)
 
-    # NOTE IMORTANT: THIS FUNCTION DOESN'T ACTUALLY PERFORM ANY FEATURE SELECTION, I BELIEVE THIS ONLY GIVES AWAY THE DATAFRAME FOR CORRELATIONS. CHANGE PLS
     logger.info("Initializing Correlation-Based Feature Learning")
-    dat_c = data.loc[:, acute_classification['sample']]
+
+    classified_samples_acute = acute_classification.loc[acute_classification['class'].notna(), 'sample']
+
+    # Samples are columns
+    dat_c = data.loc[:, classified_samples_acute]
+    # logger.debug(f"\n{dat_c.to_markdown()}")
 
     corr1 = pd.DataFrame()
-
-
+    
     logger.info("Performing correlation between Acute classification and genes expression")
     for i in range(0,dat_c.shape[0]):
         res = sc.spearmanr(dat_c.iloc[i,:], acute_classification.loc[:,'class'])
         res2 = pd.DataFrame.from_dict({'R': [res.statistic], 'p_value': [res.pvalue]})
         corr1 = pd.concat([corr1, res2])
     corr1.index = dat_c.index
-    corr1['Genes'] = corr1.index # NOTE: is this necessary?
-    logger.debug(f"corr1:\n{corr1.to_markdown()}")
+    corr1['Genes'] = corr1.index
+    logger.debug(f"corr1:\n{corr1.head(n=200).to_markdown()}")
 
-
-    corr_genes = corr1[abs(corr1['R'])>=cutoff_corr].index.to_list()
+    if not cutoff_corr:
+        logger.info("Correlation between genes expression and the initial classification is not defined")
+        logger.info("Using Q3 of absolute R values as cutoff")
+        cutoff_corr = abs(corr1['R']).quantile(0.75)
+    
+    logger.info(f"R cutoff value between genes expression and classification: {cutoff_corr:.3f}")  
+    corr_genes = corr1[(abs(corr1['R'])>=cutoff_corr) & (corr1['p_value']<=pval)].index.to_list()
+    logger.info(f"Number of significant genes with R higher than {cutoff_corr:.3f}: {len(corr_genes)}")
 
     if len(corr_genes) == 0:
 
-        logger.warning(f"""
-            There are no genes higher than {cutoff_corr}. The maximum R value is {np.round(np.max(abs(corr1['R'])),2)}. 
-            By default the analyses will be performed only with significant
-            correlations (p-value <= 0.05)
-        """)
+        logger.warning(f"There are no genes higher than {cutoff_corr}.")
+        logger.warning(f"The maximum R value is {np.round(np.max(abs(corr1['R'])),2)}.") 
+        logger.warning(f"By default the analyses will be performed only with significant correlations (p-value <= 0.05)") 
     
         corr_genes = corr1[corr1['p_value']<=pval].index.to_list()
 
-    # NOTE: If corr_genes are 0 the next steps will fail. Check for early stop.
     subdat = data.loc[corr_genes,:]
-    # NOTE: I believe this would repeat combinations. If so TODO: fix with itertools
+
+    logger.debug(f"Selecction of genes data:\n{subdat.head(n=200).to_markdown()}")
+    logger.debug(f"Shape: {subdat.shape}")
+    
+    # TODO: Perform with itertools, this method suffers with ranges > 1000
     index_loop = []
     for i in range(0,subdat.shape[0]):
         for j in range(i+1, subdat.shape[0]):
-            logger.debug(f"Combinations: i: {i}; j: {j}")
+            # logger.debug(f"Combinations: i: {i}; j: {j}")
             # logger.debug(f"Subdat:\n{subdat}")
             index_loop.append((subdat,i,j)) # NOTE: this subdat stays the same for all iterations, and it is kept on memory for each iteration. TODO: Optimize
     logger.info("Performing Gene to Gene correlation for Feature Selection")
+
+
     with Pool() as pool:
         results = pool.map(_corr_loop, index_loop)
 
+    
     corr2 = pd.concat(results)
-    logger.debug(f"correlations Gene to Gene Results:\n{corr2.to_markdown()}")
-    # NOTE: is igraph necessary for this calculation?
-    g = ig.Graph.TupleList(corr2[(corr2['p_value']<pval) & (abs(corr2['R'])>cutoff_corr_genes)].loc[:, ['Gene1', "Gene2"]].itertuples(index=False))
-    components = g.connected_components(mode='weak')
+    if logger.level == logging.DEBUG:
+        corr1.to_csv("corr1.csv", index=False, header = True) # DEBUG
+        corr2.to_csv("corr2.csv", index=False, header = True) # DEBUG
+    logger.debug(f"correlations Gene to Gene Results:\n{corr2.head(n=200).to_markdown()}")
+    
+    # Using iGraph for gene selection. 
+    # Correlation threshold is used to build a graph. 
+    # We only select the most representative (higher R with CLASSIFICATION) gene from each set
 
+    if not cutoff_corr_genes:
+        logger.info("Correlation between genes expression is not defined")
+        logger.info("Using Q3 of absolute R values as cutoff")
+        cutoff_corr_genes = abs(corr2['R']).quantile(0.75)
+
+    logger.info(f"R Gene x Gene cutoff value: {cutoff_corr_genes:.3f}") # NOTE: change wording
+
+    gene_tuples = corr2[(corr2['p_value']<pval) & (abs(corr2['R'])>cutoff_corr_genes)]\
+        .loc[:, ['Gene1', "Gene2"]]\
+        .itertuples(index=False) # Generator
+    
+    # Graph building
+    g = ig.Graph.TupleList(gene_tuples)
+    components = g.connected_components(mode='weak')
+    all_genes = set(corr2['Gene1']).union(set(corr2['Gene2']))
+    current_nodes = set(g.vs['name'])
+    isolated_nodes = all_genes - current_nodes
+    g.add_vertices(list(isolated_nodes))
+    components = g.connected_components(mode='weak')
+    
     toselection = corr1.loc[g.get_vertex_dataframe()['name'],:]
     toselection['membership'] = components.membership
     selected_genes = []
 
     for i in set(toselection['membership']):
-        logger.debug(f"Graph membership")
-        logger.debug(f"i: {i}")
+        logger.debug(f"Cluster: {i}")
         values = toselection.loc[toselection['membership'] == i]
-        values['R_abs'] = np.abs(values['R'])
-        selected_genes.append(values.iloc[pd.Series(values['R_abs'].tolist()).idxmax(), :].name)
-    
-    remove_genes = [gene for gene in toselection.index.to_list() if gene not in selected_genes]
-
-    corr1_final = corr1.loc[(~corr1['Genes'].isin(remove_genes)) & (corr1['p_value'] <= 0.05)] # NOTE: hardcoded 0.05 pvalue threshold?
-    # corr1_final = corr1.query('Genes not in @remove_genes and p_value <= 0.05')
-    corr1_final['R_abs'] = np.abs(corr1_final.loc[:,'R'])
-    logger.info(f"Number of genes selected: {len(corr1_final)}")
+        logger.debug(f"Number of genes in Cluster {i}: {len(values)}")
+        logger.debug(f"Cluster values: \n{values.to_markdown()}")
+        selected_gene = abs(values['R']).idxmax()
+        logger.debug(f"Gene with max absolute R value from Cluster {i}: {selected_gene}")
+        selected_genes.append(selected_gene)
+       
+    corr1_final = corr1.loc[(corr1['Genes'].isin(selected_genes) & (corr1['p_value'] <= pval))] # is pval needed? 
+    logger.info(f"Number of final genes selected: {len(corr1_final)}")
     
     return corr1_final
 
@@ -502,14 +538,16 @@ def run_catrans(
         batch_col=batch_col
     )
 
-    history, degs_list, dea_results_list = _semisupervised_model(
-        data=normalized_data.T, # NOTE: I still don't get why the transposed data is needed. It is possible that is Deseq2's fault, but who am I to judge.
-        data_raw=raw_counts,
-        signature=signature_genes,
-        acute_classification=acute_classification,
-        models=models,
-        threshold=model_threshold
-    )
+    if signature_genes:
+
+        history, degs_list, dea_results_list = _semisupervised_model(
+            data=normalized_data.T, # NOTE: I still don't get why the transposed data is needed. It is possible that is Deseq2's fault, but who am I to judge.
+            data_raw=raw_counts,
+            signature=signature_genes,
+            acute_classification=acute_classification,
+            models=models,
+            threshold=model_threshold
+        )
 
     return history, degs_list, dea_results_list 
     # NOTE: I don't like this. Should return an Object with all data? Would be bit more structured
