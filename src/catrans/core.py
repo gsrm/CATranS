@@ -1,17 +1,20 @@
 # Load dependencies
-from narwhals import corr
 import pandas as pd 
+from scipy import stats
 import statistics as st
 import numpy as np
 import scipy.stats as sc
+from statsmodels.stats.multitest import multipletests
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
 import igraph as ig
+from itertools import combinations
 from multiprocessing import Pool
 from inmoose.pycombat import pycombat_seq
 from typing import Any, List
 import logging
+from time import time
 
 # internal dependencies
 from catrans._logging import _get_logger, _setup_internal_logger
@@ -112,32 +115,56 @@ def _diffExpAnalysis(
     return degs, dea_res
 
 
-def _corr_loop(
-    mytupleindex: tuple[pd.DataFrame,int,int]
-    ) -> pd.DataFrame:
+# def _corr_loop(mytupleindex):
+#     """Helper for parallel correlation computation between two genes.
+
+#     This function is intended to be used with multiprocessing.Pool.map.
+
+#     Args:
+#         mytupleindex: Tuple of (subdat, i, j) where `subdat` is a gene x sample
+#             DataFrame and i/j are row indices to correlate.
+
+#     Returns:
+#         DataFrame with columns ['Gene1', 'Gene2', 'R', 'p_value'] for the pair.
+#     """
+#     subdat, i, j = mytupleindex
+#     res = sc.pearsonr(
+#         subdat.iloc[i,:],
+#         subdat.iloc[j,:]
+#         )
+#     res_row = pd.DataFrame.from_dict({
+#         'Gene1': [subdat.index[i]],
+#         'Gene2':[subdat.index[j]],  
+#         'R': [res.statistic],
+#         'p_value': [res.pvalue]})
+#     return res_row
+
+def _correlation_of_gene_tuples(df: pd.DataFrame):
     """
-    Helper for parallel correlation computation between two genes.
-
-    This function is intended to be used with multiprocessing.Pool.map.
-
-    Parameters:
-        mytupleindex: Tuple of (subdat, i, j) where `subdat` is a gene x sample
-            DataFrame and i/j are row indices to correlate.
-
-    Returns:
-        DataFrame with columns ['Gene1', 'Gene2', 'R', 'p_value'] for the pair.
+    doc string
     """
-    subdat, i, j = mytupleindex
-    res = sc.pearsonr(subdat.iloc[i,:], subdat.iloc[j,:])
-    res2 = pd.DataFrame.from_dict({
-        'Gene1': [subdat.index[i]],
-        'Gene2':[subdat.index[j]],
-        'R': [res.statistic],
-        'p_value': [res.pvalue]
-        })
-    # logger.debug(f"i: {i}; j: {j}")
-    # logger.debug(f"res2:\n{res2.to_markdown()}")
-    return res2
+
+    # Calculate Pearson correlation (r)
+    r_df = df.corr(method='pearson')
+    # Calculate p-values with numpy 
+    n = len(df)
+    df_degrees = n - 2
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t_matrix = r_df * np.sqrt(df_degrees / (1 - r_df**2))
+        p_matrix = stats.t.sf(np.abs(t_matrix), df_degrees) * 2
+
+    np.fill_diagonal(p_matrix, np.nan)
+    p_df = pd.DataFrame(p_matrix, index=r_df.index, columns=r_df.columns)
+
+    # Avoid repeted combinations by only having from the top diagonal
+    mask = np.triu(np.ones(r_df.shape), k=1).astype(bool)
+    df_result = pd.DataFrame({
+        'Gene1' : np.repeat(r_df.index, r_df.shape[1])[mask.ravel()],
+        'Gene2' : np.tile(r_df.index, r_df.shape[0])[mask.ravel()],
+        'R' : r_df.values[mask],
+        'p_value' : p_df.values[mask]
+    })
+    return df_result
 
 
 def _semisupervised_model(
@@ -279,8 +306,8 @@ def _semisupervised_model(
 def _get_normalized_batch_corrected(
     counts_df: pd.DataFrame,
     metadata_df: pd.DataFrame,
-    design_factor: str = "condition", # será class, no?
-    batch_col: str = "batch",
+    # design_factor: str = "1", # será class, no? # NOTE: it isn't necessary since design_factor is 1
+    batch_col: str | None = None,
     log_transform: bool = True,
     ) -> pd.DataFrame | Any:
     """
@@ -299,42 +326,35 @@ def _get_normalized_batch_corrected(
     Returns:
         DataFrame of normalized (and optionally log-transformed) counts.
     """
-    logger.info("Normalizing data")
-    try:
-        counts_df = counts_df.loc[:, metadata_df.loc[metadata_df['class'].notna(), 'sample']]
-        ## esto funciona por la puta coña de que se machaca la variable en lugar de crear una nueva
-        ## pero esto no pasa en la función de differential expressión, por lo que me estaba quedando
-        ## atascadísimo con los nuevos cambios. Bastante increíble.
-        logger.debug("pasa esto por aquí?")
-        logger.debug(f"Longitud del dataframe este: {len(counts_df)}")
-    except Exception:
-        # print('Classification must be a dataframe with a column sample and class\n')
-        # NOTE: This is wrong. Actually, program only works if it goes through this exception (nice).
-        pass
-    
-    # pycombat expects (genes x samples)
-    batch = metadata_df[batch_col].tolist()
-    corrected = pycombat_seq(counts_df, batch)
-    # TODO: Review corrected object to see what is it.
-    # NOTE: It should be possible to normalize without using a batch column.
+    logger.info("Performing Data Normalization")
 
-    # TODO: change number of CPUs for a parameter input ?
+    if batch_col:     
+        logging.info("Batch column input: {batch_col}")        
+        logging.info("Performing batch correction")
+        # pycombat expects (genes x samples)
+        batch = metadata_df[batch_col].tolist()
+        data_for_dds = pycombat_seq(counts_df, batch).T
+    else:
+        logging.info("No batch column input")
+        logging.info("Normalization will be performed without batch correction")
+        
+        data_for_dds = counts_df.T
+
     inference = DefaultInference(n_cpus=1) 
     dds = DeseqDataSet(
-        counts=corrected.T,
+        counts=pd.DataFrame(data_for_dds), # pd.df just to shut up pylance error
         metadata=metadata_df,
-        design_factors=design_factor,
+        design_factors='1',
         inference=inference,
-        # quiet=True
-    )
-    logger.debug(f"Corrected counts: \n{corrected}")
+        quiet=True
+    )   
 
     dds.fit_size_factors()
 
     normed_counts = pd.DataFrame(
         dds.layers["normed_counts"],
-        index=corrected.T.index,
-        columns=corrected.T.columns,
+        index=pd.DataFrame(data_for_dds).index,
+        columns=pd.DataFrame(data_for_dds).columns,
     )
 
     if log_transform:
@@ -342,7 +362,7 @@ def _get_normalized_batch_corrected(
 
     logger.info("Normalized data successfully")
 
-    return normed_counts
+    return normed_counts.T
 
 
 def correlation_based_feature_selection(
@@ -351,8 +371,9 @@ def correlation_based_feature_selection(
     pval: float=0.05,
     cutoff_corr: float | None = None,
     cutoff_corr_genes: float | None = None,
+    n_cpus: int = 8,
     verbose: bool=False
-    ) -> pd.DataFrame | None:
+    ) -> list[str] | None:
     """
     Find gene-gene correlation and select representative features.
 
@@ -415,24 +436,32 @@ def correlation_based_feature_selection(
     logger.debug(f"Selecction of genes data:\n{subdat.head(n=200).to_markdown()}")
     logger.debug(f"Shape: {subdat.shape}")
     
-    # TODO: Perform with itertools, this method suffers with ranges > 1000
-    index_loop = []
-    for i in range(0,subdat.shape[0]):
-        for j in range(i+1, subdat.shape[0]):
-            # logger.debug(f"Combinations: i: {i}; j: {j}")
-            # logger.debug(f"Subdat:\n{subdat}")
-            index_loop.append((subdat,i,j)) # NOTE: this subdat stays the same for all iterations, and it is kept on memory for each iteration. TODO: Optimize
     logger.info("Performing Gene to Gene correlation for Feature Selection")
 
-
-    with Pool() as pool:
-        results = pool.map(_corr_loop, index_loop)
-
     
-    corr2 = pd.concat(results)
+
+    # # Create generator with combinations
+    # gene_combinations = combinations(range(len(subdat)), 2)
+    # index_loop = ((subdat, i, j) for i, j in gene_combinations)
+
+    # # Pass generator to pool processes
+    # with Pool(processes=n_cpus) as pool:
+    #     results = pool.map(_corr_loop, index_loop)
+    
+    # Concatenate results
+    # corr2 = pd.concat(results)
+
+    corr2 = _correlation_of_gene_tuples(subdat.T)
+    # pval_correction_method = 'fdr_bh'
+    pval_correction_method = 'bonferroni'
+    logger.debug(f"Using {pval_correction_method} to correct p-values")
+    _, corr2['p_adj'], _, _ = multipletests(corr2['p_value'], alpha=0.05, method=pval_correction_method)
+    
+
     if logger.level == logging.DEBUG:
         corr1.to_csv("corr1.csv", index=False, header = True) # DEBUG
         corr2.to_csv("corr2.csv", index=False, header = True) # DEBUG
+        # corr_2_2.to_csv("corr2_2.csv", index=False, header = True) # DEBUG
     logger.debug(f"correlations Gene to Gene Results:\n{corr2.head(n=200).to_markdown()}")
     
     # Using iGraph for gene selection. 
@@ -440,13 +469,15 @@ def correlation_based_feature_selection(
     # We only select the most representative (higher R with CLASSIFICATION) gene from each set
 
     if not cutoff_corr_genes:
+        percentile = 0.95
         logger.info("Correlation between genes expression is not defined")
-        logger.info("Using Q3 of absolute R values as cutoff")
-        cutoff_corr_genes = abs(corr2['R']).quantile(0.75)
+        logger.info(f"Using percentile {percentile} of absolute R values as cutoff")
+        cutoff_corr_genes = abs(corr2['R']).quantile(percentile)
+        
 
     logger.info(f"R Gene x Gene cutoff value: {cutoff_corr_genes:.3f}") # NOTE: change wording
 
-    gene_tuples = corr2[(corr2['p_value']<pval) & (abs(corr2['R'])>cutoff_corr_genes)]\
+    gene_tuples = corr2[(corr2['p_adj']<pval) & (abs(corr2['R'])>cutoff_corr_genes)]\
         .loc[:, ['Gene1', "Gene2"]]\
         .itertuples(index=False) # Generator
     
@@ -475,16 +506,16 @@ def correlation_based_feature_selection(
     corr1_final = corr1.loc[(corr1['Genes'].isin(selected_genes) & (corr1['p_value'] <= pval))] # is pval needed? 
     logger.info(f"Number of final genes selected: {len(corr1_final)}")
     
-    return corr1_final
+    return corr1_final['Genes'].to_list()
 
 
     
 def run_catrans(
         raw_counts: pd.DataFrame,
         metadata: pd.DataFrame,
-        batch_col: str, # TODO: Review if it could accept more than a single string (should perform dimension reduction if so)
         acute_classification: pd.DataFrame,
         models: list[Any],
+        batch_col: str | None = None, # TODO: Review if it could accept more than a single string (should perform dimension reduction if so) ALSO it should be possible to not perform correction by batch, only normalization.
         model_threshold: float = 0.8,
         n_cpus: int = 8,
         signature_genes: list[str] | None = None,
@@ -492,6 +523,24 @@ def run_catrans(
     ) -> Any:
 
     _setup_internal_logger(verbose=verbose)
+
+    # TODO: Instert here Feature Selection logic
+
+    if not signature_genes:
+        logging.info("No signature genes were provided.")
+        logging.info("Feature selection will be performed with default parameters.")
+        
+        signature_genes = correlation_based_feature_selection(
+            data=raw_counts,
+            acute_classification=acute_classification,
+            n_cpus=n_cpus,
+            verbose=verbose
+        )
+        
+        if signature_genes is None:
+            raise ValueError("Feature selection failed to produce a gene signature.")
+
+
     logger.info("Initializing CATranS algorithm")
     
     # Argument checking
@@ -531,23 +580,29 @@ def run_catrans(
 
     logger.info("Normalizing DataSet...")
 
-    normalized_data = _get_normalized_batch_corrected(
-        counts_df=raw_counts,
-        metadata_df=metadata,
-        design_factor='1',
-        batch_col=batch_col
-    )
-
-    if signature_genes:
-
-        history, degs_list, dea_results_list = _semisupervised_model(
-            data=normalized_data.T, # NOTE: I still don't get why the transposed data is needed. It is possible that is Deseq2's fault, but who am I to judge.
-            data_raw=raw_counts,
-            signature=signature_genes,
-            acute_classification=acute_classification,
-            models=models,
-            threshold=model_threshold
+    # TODO: Normalization logic. should be possible to not pass any batch column to perform normalization
+    if batch_col:
+        normalized_data = _get_normalized_batch_corrected(
+            counts_df=raw_counts,
+            metadata_df=metadata,
+            batch_col=batch_col
         )
+
+    else:
+        normalized_data = _get_normalized_batch_corrected(
+            counts_df=raw_counts,
+            metadata_df=metadata
+        )
+
+    history, degs_list, dea_results_list = _semisupervised_model(
+        data=normalized_data, 
+        data_raw=raw_counts,
+        signature=signature_genes,
+        acute_classification=acute_classification,
+        models=models,
+        threshold=model_threshold
+    )
+    
 
     return history, degs_list, dea_results_list 
     # NOTE: I don't like this. Should return an Object with all data? Would be bit more structured
