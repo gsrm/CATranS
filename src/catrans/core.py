@@ -172,7 +172,7 @@ def _semisupervised_model(
         data_raw: pd.DataFrame,
         signature: list[str],
         acute_classification: pd.DataFrame,
-        models: list[Any],
+        model: Any, # Review for a sklearn object or something like that
         threshold: float,
         design: str = 'class') -> tuple[pd.DataFrame, list[pd.DataFrame], list[int]]:
     """
@@ -197,12 +197,10 @@ def _semisupervised_model(
             - new_results_df (DataFrame): Last differential expression results. 
             - degs_list (list[int]): Number of DE genes found at each iteration.
     """
-    
-    logger.info("Starting semi-supervised classification...")
 
     signal = True
     old_class = acute_classification[design]
-    degs = 0
+    degs = 0 # ?
     i = 0
     history = pd.DataFrame()
     degs_list = []
@@ -222,25 +220,35 @@ def _semisupervised_model(
         # Train the model and predict
         logger.info(f"Generating new predictions")
 
-        ## Here it should be some try-except logic
-        try:
-            if len(models) > 1:
+        # ## Here it should be some try-except logic
+        # try:
+        #     if len(models) > 1:
                 
-                predictions = []
-                for model in models:
-                    model.fit(X_tr, y_tr)
-                    y_pred_sub = model.predict_proba(data.loc[signature,:].T.to_numpy())
-                    predictions.append(y_pred_sub)
+        #         predictions = []
+        #         for model in models:
+        #             model.fit(X_tr, y_tr)
+        #             y_pred_sub = model.predict_proba(data.loc[signature,:].T.to_numpy())
+        #             predictions.append(y_pred_sub)
 
-                y_pred = np.mean(predictions, axis = 0)
+        #         y_pred = np.mean(predictions, axis = 0)
 
-            else:
-                models[0].fit(X_tr, y_tr)
-                y_pred = models[0].predict_proba(data.loc[signature, :].T.to_numpy())
+        #     else:
+        #         models[0].fit(X_tr, y_tr)
+        #         y_pred = models[0].predict_proba(data.loc[signature, :].T.to_numpy())
 
-        # TODO: study what exceptions we could have here instead of a generic Exception
+        # # TODO: study what exceptions we could have here instead of a generic Exception
+        # except Exception as e:
+        #     logger.critical(f"Program has suffered a critical exception: {e}")
+
+
+        ## NOTE: prediction from various models will be provided by user input, not by the program
+        try: 
+            model.fit(X_tr, y_tr)
+            y_pred = model.predict_proba(data.loc[signature, :].T.to_numpy())
         except Exception as e:
-            logger.critical(f"Program has suffered a critical exception: {e}")
+            logger.error(f"Program has suffered a critical exception: {e}")
+            y_pred = None # placeholder para que no se queje el linter
+        
 
         logger.info(f"Predictions were successfully performed")
         # Check the prediction
@@ -250,7 +258,13 @@ def _semisupervised_model(
         
         new_classes['old_class'] = old_class
         new_classes.columns = ['ap','dp', 'old_class']
-        new_classes['new_class'] = new_classes.apply(lambda row: 'Alive' if row['ap'] >= threshold else ('Dead' if row['dp'] > threshold else np.nan), axis = 1) # por culpa de esto hay NAs en valores ya etiquetados, pero es algo que puede ocurrir
+        new_classes['new_class'] = new_classes.apply(
+            lambda row: 'Alive' if row['ap'] >= threshold else ('Dead' if row['dp'] > threshold else np.nan),
+              axis = 1
+              )
+        
+        # logger.debug(f"new_classification: \n{new_classes.to_markdown()}")
+            
 
         # Save predictions
         classes_history = new_classes.copy()
@@ -259,7 +273,7 @@ def _semisupervised_model(
 
 
         # Stopping criteria
-        if not all(new_classes['old_class'] == new_classes['new_class']) and int(new_classes['old_class'].isnull().values.sum()) > int(new_classes['new_class'].isnull().values.sum()):
+        if not all(new_classes['old_class'] == new_classes['new_class']) and int(new_classes['old_class'].isnull().sum()) > int(new_classes['new_class'].isnull().sum()):
             logger.info("No changes in classification in this iteration")
             logger.info("Stopping")
             
@@ -297,13 +311,13 @@ def _semisupervised_model(
         # NOTE: modifiqué la identación para que salga siempre, pero ya si eso modificaré lo de que solamente pille la última iteración
         # NOTE: I modified the identation in order to see these messages always. However, it is possible I will modify this so it only appears on the last iteration with the final result
 
-        logger.info(f"The number of unclassified samples in old class is {int(new_classes['old_class'].isnull().values.sum())}")
-        logger.info(f"The number of unclassified samples in new class is {int(new_classes['new_class'].isnull().values.sum())}")
+        logger.info(f"The number of unclassified samples in old class is {int(new_classes['old_class'].isnull().sum())}")
+        logger.info(f"The number of unclassified samples in new class is {int(new_classes['new_class'].isnull().sum())}")
         
     return history, degs_list, dea_results_list
 
 
-def _get_normalized_batch_corrected(
+def _get_normalized_dataset(
     counts_df: pd.DataFrame,
     metadata_df: pd.DataFrame,
     # design_factor: str = "1", # será class, no? # NOTE: it isn't necessary since design_factor is 1
@@ -408,7 +422,11 @@ def correlation_based_feature_selection(
     logger.info("Performing correlation between Acute classification and genes expression")
     for i in range(0,dat_c.shape[0]):
         res = sc.spearmanr(dat_c.iloc[i,:], acute_classification.loc[:,'class'])
-        res2 = pd.DataFrame.from_dict({'R': [res.statistic], 'p_value': [res.pvalue]})
+        res2 = pd.DataFrame.from_dict({
+            'rho'      : [res[0]], # Statistic
+            'p_value': [res[1]]  # p-value
+            })
+        
         corr1 = pd.concat([corr1, res2])
     corr1.index = dat_c.index
     corr1['Genes'] = corr1.index
@@ -417,10 +435,10 @@ def correlation_based_feature_selection(
     if not cutoff_corr:
         logger.info("Correlation between genes expression and the initial classification is not defined")
         logger.info("Using Q3 of absolute R values as cutoff")
-        cutoff_corr = abs(corr1['R']).quantile(0.75)
+        cutoff_corr = abs(corr1['rho']).quantile(0.75)
     
     logger.info(f"R cutoff value between genes expression and classification: {cutoff_corr:.3f}")  
-    corr_genes = corr1[(abs(corr1['R'])>=cutoff_corr) & (corr1['p_value']<=pval)].index.to_list()
+    corr_genes = corr1[(abs(corr1['rho'])>=cutoff_corr) & (corr1['p_value']<=pval)].index.to_list()
     logger.info(f"Number of significant genes with R higher than {cutoff_corr:.3f}: {len(corr_genes)}")
 
     if len(corr_genes) == 0:
@@ -499,7 +517,7 @@ def correlation_based_feature_selection(
         values = toselection.loc[toselection['membership'] == i]
         logger.debug(f"Number of genes in Cluster {i}: {len(values)}")
         logger.debug(f"Cluster values: \n{values.to_markdown()}")
-        selected_gene = abs(values['R']).idxmax()
+        selected_gene = abs(values['rho']).idxmax()
         logger.debug(f"Gene with max absolute R value from Cluster {i}: {selected_gene}")
         selected_genes.append(selected_gene)
        
@@ -514,7 +532,7 @@ def run_catrans(
         raw_counts: pd.DataFrame,
         metadata: pd.DataFrame,
         acute_classification: pd.DataFrame,
-        models: list[Any],
+        model: Any, # Review for sklearn definition or something
         batch_col: str | None = None, # TODO: Review if it could accept more than a single string (should perform dimension reduction if so) ALSO it should be possible to not perform correction by batch, only normalization.
         model_threshold: float = 0.8,
         n_cpus: int = 8,
@@ -523,12 +541,13 @@ def run_catrans(
     ) -> Any:
 
     _setup_internal_logger(verbose=verbose)
+   
 
     # TODO: Instert here Feature Selection logic
 
     if not signature_genes:
-        logging.info("No signature genes were provided.")
-        logging.info("Feature selection will be performed with default parameters.")
+        logger.info("No signature genes were provided.")
+        logger.info("Feature selection will be performed with default parameters.")
         
         signature_genes = correlation_based_feature_selection(
             data=raw_counts,
@@ -558,9 +577,9 @@ def run_catrans(
         ) # NOTE: This is horrible
     
     ## Assert models have .predict_proba function
-    for model in models:
-        if not hasattr(model, 'predict_proba'):
-            raise AttributeError("All models must have a predict_proba method in order to run semi-supervised learning.")
+
+    if not hasattr(model, 'predict_proba'):
+        raise AttributeError("Passed model must have a predict_proba method in order to run semi-supervised learning.")
     
     
     
@@ -582,14 +601,14 @@ def run_catrans(
 
     # TODO: Normalization logic. should be possible to not pass any batch column to perform normalization
     if batch_col:
-        normalized_data = _get_normalized_batch_corrected(
+        normalized_data = _get_normalized_dataset(
             counts_df=raw_counts,
             metadata_df=metadata,
             batch_col=batch_col
         )
 
     else:
-        normalized_data = _get_normalized_batch_corrected(
+        normalized_data = _get_normalized_dataset(
             counts_df=raw_counts,
             metadata_df=metadata
         )
@@ -599,7 +618,7 @@ def run_catrans(
         data_raw=raw_counts,
         signature=signature_genes,
         acute_classification=acute_classification,
-        models=models,
+        model=model,
         threshold=model_threshold
     )
     
@@ -610,5 +629,5 @@ def run_catrans(
     # Well, you can insert it in an Object that gives it like Object.final_classification or something like that
 
     # Despite everything, if it works it works.
-    # I also should review the logic in some functions, since I believe some things don't work.
+    
     
