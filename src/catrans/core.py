@@ -8,6 +8,7 @@ from statsmodels.stats.multitest import multipletests
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
+# from sklearn.base import BaseEstimator # For type hinting # doesn't work hehe
 import igraph as ig
 from itertools import combinations
 from multiprocessing import Pool
@@ -168,13 +169,15 @@ def _correlation_of_gene_tuples(df: pd.DataFrame):
 
 
 def _semisupervised_model(
-        data: pd.DataFrame,
         data_raw: pd.DataFrame,
+        data: pd.DataFrame,
         signature: list[str],
         acute_classification: pd.DataFrame,
-        model: Any, # Review for a sklearn object or something like that
+        model: Any, # Should be an sklearn-like object with fit and predict_proba
         threshold: float,
-        design: str = 'class') -> tuple[pd.DataFrame, list[pd.DataFrame], list[int]]:
+        design: str = 'class',
+        n_cpus: int = 8
+        ) -> tuple[pd.DataFrame, list[pd.DataFrame], list[int]]:
     """
     Run an iterative semi-supervised model to relabel samples and re-run DE analysis.
 
@@ -283,7 +286,7 @@ def _semisupervised_model(
             new_degs, results_df = _diffExpAnalysis(
             data = data_raw, 
             classification = classification,
-            n_cpus = 8, # May be changed to a parameter if we want to make it more flexible # TODO
+            n_cpus = n_cpus,
             design= "~"+design
             )
 
@@ -305,14 +308,13 @@ def _semisupervised_model(
             logger.info("Stopping")
             signal = False
 
-        # NOTE: should there be a positive condition to inform the algorithm will keep working? Or an ealry return on the conditional tree ?
-
-        
-        # NOTE: modifiqué la identación para que salga siempre, pero ya si eso modificaré lo de que solamente pille la última iteración
+        # NOTE: should there be a positive condition to inform the algorithm will keep working? Or an early return on the conditional tree ?
         # NOTE: I modified the identation in order to see these messages always. However, it is possible I will modify this so it only appears on the last iteration with the final result
 
         logger.info(f"The number of unclassified samples in old class is {int(new_classes['old_class'].isnull().sum())}")
         logger.info(f"The number of unclassified samples in new class is {int(new_classes['new_class'].isnull().sum())}")
+
+        logger.debug(degs_list)
         
     return history, degs_list, dea_results_list
 
@@ -320,7 +322,6 @@ def _semisupervised_model(
 def _get_normalized_dataset(
     counts_df: pd.DataFrame,
     metadata_df: pd.DataFrame,
-    # design_factor: str = "1", # será class, no? # NOTE: it isn't necessary since design_factor is 1
     batch_col: str | None = None,
     log_transform: bool = True,
     ) -> pd.DataFrame | Any:
@@ -382,11 +383,11 @@ def _get_normalized_dataset(
 def correlation_based_feature_selection(
     data: pd.DataFrame,
     acute_classification: pd.DataFrame,
-    pval: float=0.05,
+    pval: float = 0.05,
     cutoff_corr: float | None = None,
     cutoff_corr_genes: float | None = None,
     n_cpus: int = 8,
-    verbose: bool=False
+    verbose: bool = False
     ) -> list[str] | None:
     """
     Find gene-gene correlation and select representative features.
@@ -424,7 +425,7 @@ def correlation_based_feature_selection(
         res = sc.spearmanr(dat_c.iloc[i,:], acute_classification.loc[:,'class'])
         res2 = pd.DataFrame.from_dict({
             'rho'      : [res[0]], # Statistic
-            'p_value': [res[1]]  # p-value
+            'p_value'  : [res[1]]  # p-value
             })
         
         corr1 = pd.concat([corr1, res2])
@@ -444,7 +445,7 @@ def correlation_based_feature_selection(
     if len(corr_genes) == 0:
 
         logger.warning(f"There are no genes higher than {cutoff_corr}.")
-        logger.warning(f"The maximum R value is {np.round(np.max(abs(corr1['R'])),2)}.") 
+        logger.warning(f"The maximum R value is {np.round(np.max(abs(corr1['rho'])),2)}.") # Fixed typo: 'R' to 'rho'
         logger.warning(f"By default the analyses will be performed only with significant correlations (p-value <= 0.05)") 
     
         corr_genes = corr1[corr1['p_value']<=pval].index.to_list()
@@ -455,19 +456,6 @@ def correlation_based_feature_selection(
     logger.debug(f"Shape: {subdat.shape}")
     
     logger.info("Performing Gene to Gene correlation for Feature Selection")
-
-    
-
-    # # Create generator with combinations
-    # gene_combinations = combinations(range(len(subdat)), 2)
-    # index_loop = ((subdat, i, j) for i, j in gene_combinations)
-
-    # # Pass generator to pool processes
-    # with Pool(processes=n_cpus) as pool:
-    #     results = pool.map(_corr_loop, index_loop)
-    
-    # Concatenate results
-    # corr2 = pd.concat(results)
 
     corr2 = _correlation_of_gene_tuples(subdat.T)
     # pval_correction_method = 'fdr_bh'
@@ -532,8 +520,8 @@ def run_catrans(
         raw_counts: pd.DataFrame,
         metadata: pd.DataFrame,
         acute_classification: pd.DataFrame,
-        model: Any, # Review for sklearn definition or something
-        batch_col: str | None = None, # TODO: Review if it could accept more than a single string (should perform dimension reduction if so) ALSO it should be possible to not perform correction by batch, only normalization.
+        model: Any, # Should be an sklearn-like object with fit and predict_proba # this has to be done customly, which is a pain
+        batch_col: str | None = None,
         model_threshold: float = 0.8,
         n_cpus: int = 8,
         signature_genes: list[str] | None = None,
@@ -542,8 +530,6 @@ def run_catrans(
 
     _setup_internal_logger(verbose=verbose)
    
-
-    # TODO: Instert here Feature Selection logic
 
     if not signature_genes:
         logger.info("No signature genes were provided.")
@@ -580,42 +566,18 @@ def run_catrans(
 
     if not hasattr(model, 'predict_proba'):
         raise AttributeError("Passed model must have a predict_proba method in order to run semi-supervised learning.")
-    
-    
-    
-    # First steps prior to iteration
-
-
-    # ## Perform Differential Expression Analysis with the acute classification to stablish a baseline
-    # ## NOTE: Is it possible this isn't needed?
-    # degs, dea_results_df = _diffExpAnalysis(
-    #     data=raw_counts,
-    #     classification=acute_classification,
-    #     n_cpus=n_cpus,
-    #     design='class', # NOTE: I don't like the hardcoded 'class'.
-    # )
-
-    ## Normalize and batch correct data
 
     logger.info("Normalizing DataSet...")
 
-    # TODO: Normalization logic. should be possible to not pass any batch column to perform normalization
-    if batch_col:
-        normalized_data = _get_normalized_dataset(
-            counts_df=raw_counts,
-            metadata_df=metadata,
-            batch_col=batch_col
-        )
-
-    else:
-        normalized_data = _get_normalized_dataset(
-            counts_df=raw_counts,
-            metadata_df=metadata
-        )
+    normalized_data = _get_normalized_dataset(
+        counts_df=raw_counts,
+        metadata_df=metadata,
+        batch_col=batch_col
+    )
 
     history, degs_list, dea_results_list = _semisupervised_model(
-        data=normalized_data, 
         data_raw=raw_counts,
+        data=normalized_data, 
         signature=signature_genes,
         acute_classification=acute_classification,
         model=model,
