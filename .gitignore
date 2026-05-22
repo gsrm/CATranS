@@ -1,7 +1,7 @@
 .venv/
 __pycache__/
 uv.lock
-.antigravity/
+.antigravitycli/
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/

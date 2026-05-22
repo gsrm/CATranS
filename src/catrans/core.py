@@ -8,7 +8,7 @@ from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
 import igraph as ig
 from inmoose.pycombat import pycombat_seq
-from typing import Any, cast
+from typing import Any
 import logging
 
 from catrans.data import _CatransInput, CatransResult

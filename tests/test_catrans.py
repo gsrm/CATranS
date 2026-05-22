@@ -140,6 +140,7 @@ def test_run_catrans_end_to_end():
     assert result is not None
     assert result.final_classification is not None
     assert result.final_classification.shape[0] == 12
-    assert "new_class_1" in result.history.columns
+    assert "new_class_1" in result.history.columns if result.history is not None else False
+
 
 
