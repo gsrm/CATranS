@@ -8,7 +8,7 @@ class CustomFormatter(logging.Formatter):
     info_format = "[%(asctime)s] | %(levelname)-8s | %(message)s"
     debug_format = "[%(asctime)s] | %(levelname)-8s | STEP: %(funcName)s | %(message)s"
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         orig_levelname = record.levelname
         record.levelname = orig_levelname.center(8)
        
@@ -21,7 +21,7 @@ class CustomFormatter(logging.Formatter):
 def _get_logger() -> logging.Logger:
     return logging.getLogger(name=__name__)
 
-def _setup_internal_logger(verbose):
+def _setup_internal_logger(verbose: bool) -> None:
     # Si no hay handlers, creamos uno con el CustomFormatter
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)

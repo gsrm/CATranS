@@ -1,23 +1,17 @@
 # Load dependencies
 import pandas as pd 
 from scipy import stats
-import statistics as st
 import numpy as np
-import scipy.stats as sc
 from statsmodels.stats.multitest import multipletests
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
-# from sklearn.base import BaseEstimator # For type hinting # doesn't work hehe
 import igraph as ig
-from itertools import combinations
-from multiprocessing import Pool
 from inmoose.pycombat import pycombat_seq
-from typing import Any, List
+from typing import Any, cast
 import logging
-from time import time
 
-# internal dependencies
+from catrans.data import _CatransInput, CatransResult
 from catrans._logging import _get_logger, _setup_internal_logger
 
 logger = _get_logger()
@@ -55,7 +49,7 @@ def _diffExpAnalysis(
     # print(f'The dimensions of experimental design are: {ed.shape}\n')
     # _setup_internal_logger(verbose=verbose)
 
-    logger.info(f"Loading data...")
+    logger.info("Loading data...")
     logger.info(f"The dimensions of data are: {data.shape}.")
         
     try:
@@ -63,6 +57,11 @@ def _diffExpAnalysis(
     except Exception:
         raise ValueError('Classification must be a dataframe with a column sample and class') # NOTE: change if data structure changes. Or even before, this wasn't working isn't it?
 
+    # Verify that we have 2 unique classes to run differential expression analysis
+    unique_classes = classification.loc[classification['class'].notna(), 'class'].unique()
+    if len(unique_classes) == 2:
+        logger.warning(f"Fewer than 2 unique classes present ({list(unique_classes)}). Cannot perform differential expression.")
+        return 0, pd.DataFrame()
 
     logger.info("Running Differential Expression Analysis")
 
@@ -107,7 +106,7 @@ def _diffExpAnalysis(
     logger.info("Differential Expression Analysis was successfully performed.")
 
     # Results
-    logging.info(f"Differential Expression Analysis results:\n{ds.summary()}") # NOTE: It is possible that I will change this to debug level
+    logger.info(f"Differential Expression Analysis results:\n{ds.summary()}") # NOTE: It is possible that I will change this to debug level
 
     ds.summary() # NOTE: where does this goes?
     dea_res = ds.results_df
@@ -116,33 +115,9 @@ def _diffExpAnalysis(
     return degs, dea_res
 
 
-# def _corr_loop(mytupleindex):
-#     """Helper for parallel correlation computation between two genes.
-
-#     This function is intended to be used with multiprocessing.Pool.map.
-
-#     Args:
-#         mytupleindex: Tuple of (subdat, i, j) where `subdat` is a gene x sample
-#             DataFrame and i/j are row indices to correlate.
-
-#     Returns:
-#         DataFrame with columns ['Gene1', 'Gene2', 'R', 'p_value'] for the pair.
-#     """
-#     subdat, i, j = mytupleindex
-#     res = sc.pearsonr(
-#         subdat.iloc[i,:],
-#         subdat.iloc[j,:]
-#         )
-#     res_row = pd.DataFrame.from_dict({
-#         'Gene1': [subdat.index[i]],
-#         'Gene2':[subdat.index[j]],  
-#         'R': [res.statistic],
-#         'p_value': [res.pvalue]})
-#     return res_row
-
-def _correlation_of_gene_tuples(df: pd.DataFrame):
+def _correlation_of_gene_tuples(df: pd.DataFrame) -> pd.DataFrame:
     """
-    doc string
+    Calculate pairwise Pearson correlations and p-values for features (columns) in a DataFrame.
     """
 
     # Calculate Pearson correlation (r)
@@ -173,42 +148,22 @@ def _semisupervised_model(
         data: pd.DataFrame,
         signature: list[str],
         acute_classification: pd.DataFrame,
-        model: Any, # Should be an sklearn-like object with fit and predict_proba
+        model: Any,
         threshold: float,
         design: str = 'class',
         n_cpus: int = 8
-        ) -> tuple[pd.DataFrame, list[pd.DataFrame], list[int]]:
+        ) -> CatransResult:
     """
     Run an iterative semi-supervised model to relabel samples and re-run DE analysis.
-
-    The function trains classifiers on labeled data, predicts classes for all samples,
-    updates labels for confidently predicted samples, re-runs differential expression
-    analysis, and repeats until convergence.
-
-    Parameters:
-        data: Normalized (and batch-corrected) expression data (genes x samples).
-        data_raw: Raw count matrix (genes x samples) used for differential expression.
-        signature: List of genes/features used for model training.
-        acute_classification: DataFrame with columns ['sample', 'class'] for initial labels.
-        models: List of sklearn-like classifiers supporting fit() and predict_proba().
-        threshold: Probability cutoff used to label a sample as Alive or Dead.
-        design: Design formula for DESeq2 when re-running differential expression.
-
-    Returns:
-        tuple:
-            - history (DataFrame): Classification probability history for each iteration.
-            - new_results_df (DataFrame): Last differential expression results. 
-            - degs_list (list[int]): Number of DE genes found at each iteration.
+    Returns a `CatransResult` object containing iterations and classification history.
     """
 
+    results = CatransResult()
     signal = True
     old_class = acute_classification[design]
-    degs = 0 # ?
+    degs = 0
     i = 0
     history = pd.DataFrame()
-    degs_list = []
-    dea_results_list = []
-
 
     while signal:
 
@@ -216,44 +171,24 @@ def _semisupervised_model(
         logger.info(f"Iteration {i}")
 
         # Create the data frame with normalised and batch corrected data and the class for each sample
-        X_tr = data.loc[signature, old_class.notna().index].T.to_numpy()
-        y_tr = old_class
+        # Filter to only labeled samples to avoid training on unlabeled (NaN) samples
+        labeled_samples = old_class.dropna().index
+        X_tr = data.loc[signature, labeled_samples].T.to_numpy()
+        y_tr = old_class.loc[labeled_samples]
         y_tr = y_tr.map(lambda x: 1 if x == "Dead" else 0).to_numpy()
 
         # Train the model and predict
-        logger.info(f"Generating new predictions")
+        logger.info("Generating new predictions")
 
-        # ## Here it should be some try-except logic
-        # try:
-        #     if len(models) > 1:
-                
-        #         predictions = []
-        #         for model in models:
-        #             model.fit(X_tr, y_tr)
-        #             y_pred_sub = model.predict_proba(data.loc[signature,:].T.to_numpy())
-        #             predictions.append(y_pred_sub)
-
-        #         y_pred = np.mean(predictions, axis = 0)
-
-        #     else:
-        #         models[0].fit(X_tr, y_tr)
-        #         y_pred = models[0].predict_proba(data.loc[signature, :].T.to_numpy())
-
-        # # TODO: study what exceptions we could have here instead of a generic Exception
-        # except Exception as e:
-        #     logger.critical(f"Program has suffered a critical exception: {e}")
-
-
-        ## NOTE: prediction from various models will be provided by user input, not by the program
         try: 
             model.fit(X_tr, y_tr)
             y_pred = model.predict_proba(data.loc[signature, :].T.to_numpy())
         except Exception as e:
             logger.error(f"Program has suffered a critical exception: {e}")
-            y_pred = None # placeholder para que no se queje el linter
+            y_pred = None
         
 
-        logger.info(f"Predictions were successfully performed")
+        logger.info("Predictions were successfully performed")
         # Check the prediction
         new_classes = pd.DataFrame(y_pred)
         
@@ -262,11 +197,9 @@ def _semisupervised_model(
         new_classes['old_class'] = old_class
         new_classes.columns = ['ap','dp', 'old_class']
         new_classes['new_class'] = new_classes.apply(
-            lambda row: 'Alive' if row['ap'] >= threshold else ('Dead' if row['dp'] > threshold else np.nan),
+             lambda row: 'Alive' if row['ap'] >= threshold else ('Dead' if row['dp'] > threshold else np.nan),
               axis = 1
               )
-        
-        # logger.debug(f"new_classification: \n{new_classes.to_markdown()}")
             
 
         # Save predictions
@@ -277,22 +210,22 @@ def _semisupervised_model(
 
         # Stopping criteria
         if not all(new_classes['old_class'] == new_classes['new_class']) and int(new_classes['old_class'].isnull().sum()) > int(new_classes['new_class'].isnull().sum()):
-            logger.info("No changes in classification in this iteration")
-            logger.info("Stopping")
+            logger.info("Classification changed; running Differential Expression Analysis...")
             
-            classification = pd.DataFrame({"sample" : new_classes.loc[new_classes['new_class'].notna(),:].index,
-                                            design : new_classes.loc[new_classes['new_class'].notna(),"new_class"]}) # esta columna se debería llamar design, ya que entra en la siguiente función, si alguien no le apetece llamarle class no funcionaría #TODO #DONE
+            classification = pd.DataFrame({
+                "sample" : new_classes.loc[new_classes['new_class'].notna(),:].index,
+                design : new_classes.loc[new_classes['new_class'].notna(),"new_class"]
+            })
             
             new_degs, results_df = _diffExpAnalysis(
-            data = data_raw, 
-            classification = classification,
-            n_cpus = n_cpus,
-            design= "~"+design
+                data = data_raw, 
+                classification = classification,
+                n_cpus = n_cpus,
+                design= "~"+design
             )
 
-                            
-            degs_list.append(new_degs)
-            dea_results_list.append(results_df)
+            # Update results object incrementally
+            results.add_iteration(i, new_degs, results_df)
             
             if new_degs > degs:
                 
@@ -300,23 +233,21 @@ def _semisupervised_model(
                 degs = new_degs
             
             else:
-                print("condición de parada 1 y 2")
+                logger.info("Stopping condition met (no more DEGs discovered than in previous step).")
                 signal = False
             
         else:
-            logger.info("No new Differentially Expressed Genes discovered")
-            logger.info("Stopping")
+            logger.info("No changes in classification or no new samples classified. Stopping iterations.")
             signal = False
-
-        # NOTE: should there be a positive condition to inform the algorithm will keep working? Or an early return on the conditional tree ?
-        # NOTE: I modified the identation in order to see these messages always. However, it is possible I will modify this so it only appears on the last iteration with the final result
 
         logger.info(f"The number of unclassified samples in old class is {int(new_classes['old_class'].isnull().sum())}")
         logger.info(f"The number of unclassified samples in new class is {int(new_classes['new_class'].isnull().sum())}")
-
-        logger.debug(degs_list)
         
-    return history, degs_list, dea_results_list
+    results.set_final_classification(pd.DataFrame(old_class))
+    results.history = history
+
+
+    return results
 
 
 def _get_normalized_dataset(
@@ -324,7 +255,7 @@ def _get_normalized_dataset(
     metadata_df: pd.DataFrame,
     batch_col: str | None = None,
     log_transform: bool = True,
-    ) -> pd.DataFrame | Any:
+    ) -> pd.DataFrame:
     """
     Normalize and batch-correct count data for downstream modeling.
 
@@ -334,7 +265,6 @@ def _get_normalized_dataset(
     Parameters:
         counts_df: Raw count matrix (genes x samples).
         metadata_df: Sample metadata containing at least 'sample' and batch column.
-        design_factor: Column name in metadata to use as the design factor for normalization.
         batch_col: Column name in metadata specifying batch assignments.
         log_transform: If True, apply log1p to normalized counts.
 
@@ -344,14 +274,14 @@ def _get_normalized_dataset(
     logger.info("Performing Data Normalization")
 
     if batch_col:     
-        logging.info("Batch column input: {batch_col}")        
-        logging.info("Performing batch correction")
+        logger.info(f"Batch column input: {batch_col}")        
+        logger.info("Performing batch correction")
         # pycombat expects (genes x samples)
         batch = metadata_df[batch_col].tolist()
         data_for_dds = pycombat_seq(counts_df, batch).T
     else:
-        logging.info("No batch column input")
-        logging.info("Normalization will be performed without batch correction")
+        logger.info("No batch column input")
+        logger.info("Normalization will be performed without batch correction")
         
         data_for_dds = counts_df.T
 
@@ -381,13 +311,13 @@ def _get_normalized_dataset(
 
 
 def correlation_based_feature_selection(
-    data: pd.DataFrame,
-    acute_classification: pd.DataFrame,
-    pval: float = 0.05,
-    cutoff_corr: float | None = None,
-    cutoff_corr_genes: float | None = None,
-    n_cpus: int = 8,
-    verbose: bool = False
+        data: pd.DataFrame,
+        acute_classification: pd.DataFrame,
+        pval: float = 0.05,
+        cutoff_corr: float | None = None,
+        cutoff_corr_genes: float | None = None,
+        n_cpus: int = 8,
+        verbose: bool = False
     ) -> list[str] | None:
     """
     Find gene-gene correlation and select representative features.
@@ -418,20 +348,19 @@ def correlation_based_feature_selection(
     dat_c = data.loc[:, classified_samples_acute]
     # logger.debug(f"\n{dat_c.to_markdown()}")
 
-    corr1 = pd.DataFrame()
-    
+    corr_list = []
+    y_class = acute_classification.loc[:, 'class']
     logger.info("Performing correlation between Acute classification and genes expression")
-    for i in range(0,dat_c.shape[0]):
-        res = sc.spearmanr(dat_c.iloc[i,:], acute_classification.loc[:,'class'])
-        res2 = pd.DataFrame.from_dict({
-            'rho'      : [res[0]], # Statistic
-            'p_value'  : [res[1]]  # p-value
-            })
-        
-        corr1 = pd.concat([corr1, res2])
-    corr1.index = dat_c.index
+    for i in range(dat_c.shape[0]):
+        res = stats.spearmanr(dat_c.iloc[i, :], y_class)
+        corr_list.append({
+            'rho': res[0],
+            'p_value': res[1]
+        })
+    corr1 = pd.DataFrame(corr_list, index=dat_c.index)
     corr1['Genes'] = corr1.index
-    logger.debug(f"corr1:\n{corr1.head(n=200).to_markdown()}")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"corr1:\n{corr1.head(n=200).to_string()}")
 
     if not cutoff_corr:
         logger.info("Correlation between genes expression and the initial classification is not defined")
@@ -446,13 +375,13 @@ def correlation_based_feature_selection(
 
         logger.warning(f"There are no genes higher than {cutoff_corr}.")
         logger.warning(f"The maximum R value is {np.round(np.max(abs(corr1['rho'])),2)}.") # Fixed typo: 'R' to 'rho'
-        logger.warning(f"By default the analyses will be performed only with significant correlations (p-value <= 0.05)") 
+        logger.warning("By default the analyses will be performed only with significant correlations (p-value <= 0.05)") 
     
         corr_genes = corr1[corr1['p_value']<=pval].index.to_list()
 
     subdat = data.loc[corr_genes,:]
-
-    logger.debug(f"Selecction of genes data:\n{subdat.head(n=200).to_markdown()}")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"Selecction of genes data:\n{subdat.head(n=200).to_string()}")
     logger.debug(f"Shape: {subdat.shape}")
     
     logger.info("Performing Gene to Gene correlation for Feature Selection")
@@ -468,7 +397,8 @@ def correlation_based_feature_selection(
         corr1.to_csv("corr1.csv", index=False, header = True) # DEBUG
         corr2.to_csv("corr2.csv", index=False, header = True) # DEBUG
         # corr_2_2.to_csv("corr2_2.csv", index=False, header = True) # DEBUG
-    logger.debug(f"correlations Gene to Gene Results:\n{corr2.head(n=200).to_markdown()}")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"correlations Gene to Gene Results:\n{corr2.head(n=200).to_string()}")
     
     # Using iGraph for gene selection. 
     # Correlation threshold is used to build a graph. 
@@ -483,9 +413,14 @@ def correlation_based_feature_selection(
 
     logger.info(f"R Gene x Gene cutoff value: {cutoff_corr_genes:.3f}") # NOTE: change wording
 
-    gene_tuples = corr2[(corr2['p_adj']<pval) & (abs(corr2['R'])>cutoff_corr_genes)]\
-        .loc[:, ['Gene1', "Gene2"]]\
-        .itertuples(index=False) # Generator
+    gene_tuples = (
+        corr2[
+            (corr2['p_adj'] < pval)
+            & (abs(corr2['R']) > cutoff_corr_genes)
+        ]
+        .loc[:, ['Gene1', "Gene2"]]
+        .itertuples(index=False)  # Generator
+    )
     
     # Graph building
     g = ig.Graph.TupleList(gene_tuples)
@@ -504,7 +439,7 @@ def correlation_based_feature_selection(
         logger.debug(f"Cluster: {i}")
         values = toselection.loc[toselection['membership'] == i]
         logger.debug(f"Number of genes in Cluster {i}: {len(values)}")
-        logger.debug(f"Cluster values: \n{values.to_markdown()}")
+        logger.debug(f"Cluster values: \n{values.to_string()}")
         selected_gene = abs(values['rho']).idxmax()
         logger.debug(f"Gene with max absolute R value from Cluster {i}: {selected_gene}")
         selected_genes.append(selected_gene)
@@ -514,24 +449,40 @@ def correlation_based_feature_selection(
     
     return corr1_final['Genes'].to_list()
 
-
     
 def run_catrans(
         raw_counts: pd.DataFrame,
         metadata: pd.DataFrame,
         acute_classification: pd.DataFrame,
-        model: Any, # Should be an sklearn-like object with fit and predict_proba # this has to be done customly, which is a pain
+        model: Any,
         batch_col: str | None = None,
         model_threshold: float = 0.8,
         n_cpus: int = 8,
         signature_genes: list[str] | None = None,
         verbose: bool = False
-    ) -> Any:
+    ) -> CatransResult:
 
     _setup_internal_logger(verbose=verbose)
-   
 
-    if not signature_genes:
+    # Argument checking
+    if not isinstance(acute_classification, pd.DataFrame):
+        raise TypeError("acute_classification must be a pandas.DataFrame")
+
+    if 'sample' not in acute_classification.columns or 'class' not in acute_classification.columns:
+        raise ValueError("acute_classification must be a pandas.DataFrame with 'sample' and 'class' columns.")
+
+    # Create a copy to avoid mutating the caller's DataFrame in-place
+    acute_classification = acute_classification.copy()
+
+    acute_classification.set_index(
+        pd.Index(acute_classification['sample'].to_list()),
+        inplace=True
+        )
+
+    if not hasattr(model, 'predict_proba'):
+        raise AttributeError("Passed model must have a predict_proba method in order to run semi-supervised learning.")
+
+    if signature_genes is None:
         logger.info("No signature genes were provided.")
         logger.info("Feature selection will be performed with default parameters.")
         
@@ -545,51 +496,35 @@ def run_catrans(
         if signature_genes is None:
             raise ValueError("Feature selection failed to produce a gene signature.")
 
+    input_data = _CatransInput(
+        raw_counts=raw_counts,
+        metadata=metadata,
+        acute_classification=acute_classification,
+        model=model,
+        batch_col=batch_col,
+        model_threshold=model_threshold,
+        n_cpus=n_cpus,
+        signature_genes=signature_genes
+    )
 
     logger.info("Initializing CATranS algorithm")
-    
-    # Argument checking
-
-    ## Assert acute_classification is a dataframe with sample and class # NOTE: I don't really like this, however for now it would be difficult to change
-    try:
-        acute_classification[['sample', 'class']]
-    except KeyError:
-        raise ValueError("acute_classification must be a pandas.DataFrame with 'sample' and 'class' columns.")
-
-    ## Assert acute_classification also has the samples as index 
-    acute_classification.set_index(
-        pd.Index(acute_classification['sample'].to_list()),
-        inplace=True
-        ) # NOTE: This is horrible
-    
-    ## Assert models have .predict_proba function
-
-    if not hasattr(model, 'predict_proba'):
-        raise AttributeError("Passed model must have a predict_proba method in order to run semi-supervised learning.")
-
     logger.info("Normalizing DataSet...")
 
     normalized_data = _get_normalized_dataset(
-        counts_df=raw_counts,
-        metadata_df=metadata,
-        batch_col=batch_col
+        counts_df=input_data.raw_counts,
+        metadata_df=input_data.metadata,
+        batch_col=input_data.batch_col
     )
 
-    history, degs_list, dea_results_list = _semisupervised_model(
-        data_raw=raw_counts,
+    results = _semisupervised_model(
+        data_raw=input_data.raw_counts,
         data=normalized_data, 
-        signature=signature_genes,
-        acute_classification=acute_classification,
-        model=model,
-        threshold=model_threshold
+        signature=input_data.signature_genes or [],
+        acute_classification=input_data.acute_classification,
+        model=input_data.model,
+        threshold=input_data.model_threshold,
     )
     
-
-    return history, degs_list, dea_results_list 
-    # NOTE: I don't like this. Should return an Object with all data? Would be bit more structured
-    # Okay, not even that. This should ONLY give away the resulting classification, no?
-    # Well, you can insert it in an Object that gives it like Object.final_classification or something like that
-
-    # Despite everything, if it works it works.
+    return results
     
     
