@@ -119,17 +119,14 @@ print(f"\nCompleted in {result.num_iterations} iterations.")
 
 ## Detailed Component Documentation
 
-### 1. Data Normalization (`_get_normalized_dataset`)
-Applies ComBat-seq (`pycombat_seq`) to correct raw counts for batch effects if a batch column is provided. Next, it fits size factors using a `DeseqDataSet` object and normalizes counts. By default, a $log_1(x + 1)$ log-transformation is applied to scale counts for downstream machine learning modeling.
-
-### 2. Feature Selection (`correlation_based_feature_selection`)
+### 1. Feature Selection (`correlation_based_feature_selection`)
 - Computes Spearman correlation between the gene expression profiles and the clinical labels.
 - Selects top features based on a custom correlation threshold ($R$ cutoff) and $p$-value significance.
 - Computes pairwise Pearson correlation among selected genes, building an undirected co-expression graph.
 - Runs **Weakly Connected Components** over the graph using `igraph`.
 - Picks only the single most representative gene (highest absolute Spearman $R$ with the outcome) from each component cluster. This removes collinearity and reduces the feature space dimensionality.
 
-### 3. Iterative Semi-Supervised Learning Loop (`_semisupervised_model`)
+### 2. Iterative Semi-Supervised Learning Loop (`_semisupervised_model`)
 - Fits the user-provided model on the known labelled samples using the selected gene signature.
 - Predicts probability scores for all samples.
 - Classifies new samples if their predicted probability exceeds the `model_threshold` (e.g. $\ge 0.8$).
