@@ -49,6 +49,13 @@ def _diffExpAnalysis(
     # print(f'The dimensions of experimental design are: {ed.shape}\n')
     # _setup_internal_logger(verbose=verbose)
 
+    # Verify that we have 2 unique classes to run differential expression analysis
+    unique_classes = classification.loc[classification['class'].notna(), 'class'].unique()
+    if len(unique_classes) != 2:
+        logger.warning(f"Fewer than 2 unique classes present ({list(unique_classes)}). Cannot perform differential expression.")
+        return 0, pd.DataFrame()
+    
+
     logger.info("Loading data...")
     logger.info(f"The dimensions of data are: {data.shape}.")
         
@@ -57,12 +64,8 @@ def _diffExpAnalysis(
     except Exception:
         raise ValueError('Classification must be a dataframe with a column sample and class') # NOTE: change if data structure changes. Or even before, this wasn't working isn't it?
 
-    # Verify that we have 2 unique classes to run differential expression analysis
-    unique_classes = classification.loc[classification['class'].notna(), 'class'].unique()
-    if len(unique_classes) == 2:
-        logger.warning(f"Fewer than 2 unique classes present ({list(unique_classes)}). Cannot perform differential expression.")
-        return 0, pd.DataFrame()
-
+    logger.info(f"The dimensions of classified data are: {dat_c.shape}.")
+    
     logger.info("Running Differential Expression Analysis")
 
     inference = DefaultInference(n_cpus=n_cpus)
@@ -102,14 +105,14 @@ def _diffExpAnalysis(
         ds._independent_filtering()
     else:
         ds._p_value_adjustment()
+
     
     logger.info("Differential Expression Analysis was successfully performed.")
 
     # Results
-    logger.info(f"Differential Expression Analysis results:\n{ds.summary()}") # NOTE: It is possible that I will change this to debug level
-
-    ds.summary() # NOTE: where does this goes?
+    ds.summary()
     dea_res = ds.results_df
+    logger.debug(f"Differential Expression Analysis results:\n{dea_res.head(20).to_markdown()}")
     degs = dea_res.query('padj < 0.05').shape[0]
 
     return degs, dea_res
@@ -161,9 +164,15 @@ def _semisupervised_model(
     results = CatransResult()
     signal = True
     old_class = acute_classification[design]
-    degs = 0
     i = 0
-    history = pd.DataFrame()
+    # baseline for degs; this way we can infer if classifications are indeed "better" than the initial classification.
+    degs, _ = _diffExpAnalysis(
+        data = data_raw, 
+        classification = acute_classification,
+        n_cpus = n_cpus,
+        design= "~"+design
+    )
+
 
     while signal:
 
@@ -194,57 +203,60 @@ def _semisupervised_model(
         
         new_classes.set_index(data.columns, inplace=True)
         
-        new_classes['old_class'] = old_class
-        new_classes.columns = ['ap','dp', 'old_class']
-        new_classes['new_class'] = new_classes.apply(
-             lambda row: 'Alive' if row['ap'] >= threshold else ('Dead' if row['dp'] > threshold else np.nan),
+        new_classes['prior_classification'] = old_class
+        new_classes.columns = ['negative_class_probability','positive_class_probability', 'prior_classification']
+        new_classes['current_classification'] = new_classes.apply(
+             lambda row: 'Alive' if row['negative_class_probability'] >= threshold else ('Dead' if row['positive_class_probability'] > threshold else np.nan),
               axis = 1
               )
             
+        logger.info("Updating classification")
 
-        # Save predictions
-        classes_history = new_classes.copy()
-        classes_history.columns = [f"ap_{i}",f"dp_{i}",f"old_class_{i}", f"new_class_{i}"]
-        history = pd.concat([history,classes_history], axis=1)
-
-
+        logger.info(f"The number of unclassified samples in previous iteration is {int(new_classes['prior_classification'].isnull().sum())}")
+        logger.info(f"The number of unclassified samples in current iteration is {int(new_classes['current_classification'].isnull().sum())}")
         # Stopping criteria
-        if not all(new_classes['old_class'] == new_classes['new_class']) and int(new_classes['old_class'].isnull().sum()) > int(new_classes['new_class'].isnull().sum()):
-            logger.info("Classification changed; running Differential Expression Analysis...")
+        if not all(new_classes['prior_classification'] == new_classes['current_classification']) and int(new_classes['prior_classification'].isnull().sum()) > int(new_classes['current_classification'].isnull().sum()):
             
+            # Update results object incrementally
+            logger.info("Classification changed; running Differential Expression Analysis...")        
             classification = pd.DataFrame({
-                "sample" : new_classes.loc[new_classes['new_class'].notna(),:].index,
-                design : new_classes.loc[new_classes['new_class'].notna(),"new_class"]
+                "sample" : new_classes.loc[new_classes['current_classification'].notna(),:].index,
+                design : new_classes.loc[new_classes['current_classification'].notna(),"current_classification"]
             })
-            
-            new_degs, results_df = _diffExpAnalysis(
+            logger.info("Performing Differential Expression Analysis with new classification.")
+
+            new_degs, dea_results = _diffExpAnalysis(
                 data = data_raw, 
                 classification = classification,
                 n_cpus = n_cpus,
                 design= "~"+design
             )
-
-            # Update results object incrementally
-            results.add_iteration(i, new_degs, results_df)
+           
+            logger.info(f"DEGs on prior iteration: {degs}")
+            logger.info(f"DEGs on current iteration: {new_degs}")
             
             if new_degs > degs:
                 
-                old_class = new_classes['new_class']
+                logging.info("All conditions passed, saving iteration result.")
+                results.add_iteration(i, new_degs, dea_results, new_classes)
+                old_class = new_classes['current_classification']
                 degs = new_degs
             
             else:
-                logger.info("Stopping condition met (no more DEGs discovered than in previous step).")
+                logger.info("Stopping condition met: no more DEGs discovered than in previous step.")
+                logging.info("Results of this iteration will not be saved.")
+                
                 signal = False
             
         else:
-            logger.info("No changes in classification or no new samples classified. Stopping iterations.")
+            logger.info("Stopping condition met: No changes in classification or no new samples classified.")
+            logging.info("Results of this iteration will not be saved.")
+            
             signal = False
 
-        logger.info(f"The number of unclassified samples in old class is {int(new_classes['old_class'].isnull().sum())}")
-        logger.info(f"The number of unclassified samples in new class is {int(new_classes['new_class'].isnull().sum())}")
-        
+    logger.info("Program ended.")
     results.set_final_classification(pd.DataFrame(old_class))
-    results.history = history
+    # results.history = history
 
 
     return results
@@ -303,7 +315,7 @@ def _get_normalized_dataset(
     )
 
     if log_transform:
-        normed_counts = np.log1p(normed_counts)
+        normed_counts = pd.DataFrame(np.log1p(normed_counts))
 
     logger.info("Normalized data successfully")
 
@@ -346,25 +358,27 @@ def correlation_based_feature_selection(
 
     # Samples are columns
     dat_c = data.loc[:, classified_samples_acute]
-    # logger.debug(f"\n{dat_c.to_markdown()}")
 
     corr_list = []
     y_class = acute_classification.loc[:, 'class']
     logger.info("Performing correlation between Acute classification and genes expression")
+
     for i in range(dat_c.shape[0]):
         res = stats.spearmanr(dat_c.iloc[i, :], y_class)
         corr_list.append({
             'rho': res[0],
             'p_value': res[1]
         })
+
     corr1 = pd.DataFrame(corr_list, index=dat_c.index)
     corr1['Genes'] = corr1.index
+
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"corr1:\n{corr1.head(n=200).to_string()}")
 
     if not cutoff_corr:
         logger.info("Correlation between genes expression and the initial classification is not defined")
-        logger.info("Using Q3 of absolute R values as cutoff")
+        logger.info("Using Q3 of absolute rho values as cutoff")
         cutoff_corr = abs(corr1['rho']).quantile(0.75)
     
     logger.info(f"R cutoff value between genes expression and classification: {cutoff_corr:.3f}")  
@@ -376,14 +390,14 @@ def correlation_based_feature_selection(
         logger.warning(f"There are no genes higher than {cutoff_corr}.")
         logger.warning(f"The maximum R value is {np.round(np.max(abs(corr1['rho'])),2)}.") # Fixed typo: 'R' to 'rho'
         logger.warning("By default the analyses will be performed only with significant correlations (p-value <= 0.05)") 
-    
+
         corr_genes = corr1[corr1['p_value']<=pval].index.to_list()
 
-    subdat = data.loc[corr_genes,:]
+    subdat = dat_c.loc[corr_genes,:]
+
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"Selecction of genes data:\n{subdat.head(n=200).to_string()}")
     logger.debug(f"Shape: {subdat.shape}")
-    
     logger.info("Performing Gene to Gene correlation for Feature Selection")
 
     corr2 = _correlation_of_gene_tuples(subdat.T)
@@ -405,12 +419,12 @@ def correlation_based_feature_selection(
     # We only select the most representative (higher R with CLASSIFICATION) gene from each set
 
     if not cutoff_corr_genes:
-        percentile = 0.95
+        percentile = 0.75
         logger.info("Correlation between genes expression is not defined")
-        logger.info(f"Using percentile {percentile} of absolute R values as cutoff")
+        logger.info("Using Q3 of absolute R values as cutoff")
+        # logger.info(f"Using percentile {percentile} of absolute R values as cutoff")
         cutoff_corr_genes = abs(corr2['R']).quantile(percentile)
         
-
     logger.info(f"R Gene x Gene cutoff value: {cutoff_corr_genes:.3f}") # NOTE: change wording
 
     gene_tuples = (
@@ -445,6 +459,7 @@ def correlation_based_feature_selection(
         selected_genes.append(selected_gene)
        
     corr1_final = corr1.loc[(corr1['Genes'].isin(selected_genes) & (corr1['p_value'] <= pval))] # is pval needed? 
+    logger.debug(corr1_final.to_markdown())
     logger.info(f"Number of final genes selected: {len(corr1_final)}")
     
     return corr1_final['Genes'].to_list()

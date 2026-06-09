@@ -9,6 +9,9 @@ from catrans.core import (
     run_catrans,
 )
 
+
+# TODO: Refactor for the new object structure
+
 def test_catrans_result_data_structure():
     """Verify that the CatransResult container correctly stores iterations and classifications."""
     result = CatransResult()
