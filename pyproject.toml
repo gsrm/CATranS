@@ -9,16 +9,31 @@ authors = [
 ]
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["bioinformatics", "machine-learning", "deseq2", "stratification", "genomics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
 dependencies = [
     "numpy>=2.3.0",
     "pandas>=2.3.3",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.1",
     "pydeseq2>=0.5.4",
-    "matplotlib>=3.10.8",
     "igraph>=1.0.0",
     "inmoose>=0.9.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ruben-canas-ivi/CATranS"
+Issues = "https://github.com/ruben-canas-ivi/CATranS/issues"
 
 [build-system]
 requires = ["hatchling"]
