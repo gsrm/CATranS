@@ -2,14 +2,15 @@
 
 **CATranS** is a robust bioinformatics and machine learning pipeline written in Python designed to stratify acute clinical cohorts using transcriptomic count data. 
 
-Through an iterative, semi-supervised learning approach, CATranS combines data normalization, batch correction, correlation-based feature selection, and class prediction to refine classifications of patient cohorts (e.g., separating acute from non-acute states or predicting survival outcomes like Alive/Dead).
+Through an iterative, semi-supervised learning approach, CATranS combines data normalization, batch correction, correlation-based feature selection, and class prediction to refine classifications of patient cohorts (e.g., separating acute from non-acute states, or predicting survival outcomes).
 
 ---
 
 ## Key Features
 
 - **Iterative Semi-Supervised Relabeling**: Safely expands training cohorts by predicting clinical labels on unclassified/unlabeled samples using high-confidence thresholds.
-- **Batch Correction**: Integrated with `inmoose` for robust ComBat-seq count batch effect correction.
+- **Generalized Custom Classes**: Supports user-defined positive and negative class labeling (e.g., `Survivor`/`NonSurvivor`, `Mild`/`Severe`, `Responders`/`NonResponders`) with robust Categorical ordering to fix Wald contrast directions in DESeq2.
+- **Batch Correction**: Integrated with `inmoose` for ComBat-seq count batch effect correction.
 - **DESeq2-style Normalization**: Leverages the high-performance `pydeseq2` implementation for median-of-ratios normalization.
 - **Correlation-Based Feature Learning**: Custom graph-theory based gene selection utilizing `igraph`. Filters out highly redundant co-expressed genes and selects optimal representative biomarkers correlating with clinical outcomes.
 - **Flexible Estimator Integration**: Compatible with any Scikit-Learn classifier exposing a `predict_proba` method.
@@ -61,78 +62,160 @@ uv sync
 
 ---
 
-## Quickstart Example
+## API Reference & Usage Scenarios
 
-Here is a quick script demonstrating how to prepare synthetic transcriptomic data and run the CATranS pipeline using a simple Scikit-Learn `RandomForestClassifier`.
+### Core Classes & Functions
 
-```python
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from catrans import run_catrans
+#### 1. `CatransClasses`
+Defines the names of the binary classes.
+- `positive` (default `"Dead"`): The target/case class.
+- `negative` (default `"Alive"`): The reference/control class.
 
-# 1. Generate a mock raw count matrix (100 genes x 20 samples)
-np.random.seed(42)
-genes = [f"Gene_{i}" for i in range(100)]
-samples = [f"Sample_{j}" for j in range(20)]
-raw_counts = pd.DataFrame(
-    np.random.negative_binomial(n=10, p=0.1, size=(100, 20)),
-    index=genes,
-    columns=samples
-)
+#### 2. `correlation_based_feature_selection`
+Identifies representative biomarker genes by correlating expression levels with labels, building a gene-gene correlation network, and selecting one representative gene per connected component.
 
-# 2. Generate sample metadata
-metadata = pd.DataFrame({
-    "sample": samples,
-    "batch": ["A"] * 10 + ["B"] * 10,  # Batch covariates
-}, index=samples)
-
-# 3. Create initial clinical classifications (Alive, Dead, or NaN for unclassified)
-acute_classification = pd.DataFrame({
-    "sample": samples,
-    "class": ["Alive"] * 4 + ["Dead"] * 4 + [np.nan] * 12
-}, index=samples)
-
-# 4. Initialize a Scikit-Learn estimator
-model = RandomForestClassifier(n_estimators=50, random_state=42)
-
-# 5. Run the CATranS Stratification Pipeline
-result = run_catrans(
-    raw_counts=raw_counts,
-    metadata=metadata,
-    acute_classification=acute_classification,
-    model=model,
-    batch_col="batch",
-    model_threshold=0.75,
-    n_cpus=2,
-    verbose=True
-)
-
-# 6. Inspect final results
-print("\n--- Final Stratified Classifications ---")
-print(result.final_classification)
-
-print(f"\nCompleted in {result.num_iterations} iterations.")
-```
+#### 3. `run_catrans`
+Runs the iterative semi-supervised relabeling pipeline.
+- `raw_counts` (pd.DataFrame): Genes (rows) by Samples (columns).
+- `metadata` (pd.DataFrame): Samples (rows) with metadata.
+- `acute_classification` (pd.DataFrame): Samples (rows) with initially known labels under the column `"class"` (unlabeled samples should be `NaN`).
+- `model`: Any Scikit-Learn compatible classifier (e.g. `RandomForestClassifier`, `SVC(probability=True)`).
+- `classes` (CatransClasses, Optional): Custom positive/negative class names.
+- `batch_col` (str, Optional): Metadata column to use for ComBat-seq batch correction.
+- `model_threshold` (float, default `0.8`): Confidence threshold to assign a label.
+- `signature_genes` (list[str], Optional): Genes to use for training the model. If `None`, `correlation_based_feature_selection` runs automatically.
 
 ---
 
-## Detailed Component Documentation
+### Usage Scenarios
 
-### 1. Feature Selection (`correlation_based_feature_selection`)
-- Computes Spearman correlation between the gene expression profiles and the clinical labels.
-- Selects top features based on a custom correlation threshold ($R$ cutoff) and $p$-value significance.
-- Computes pairwise Pearson correlation among selected genes, building an undirected co-expression graph.
-- Runs **Weakly Connected Components** over the graph using `igraph`.
-- Picks only the single most representative gene (highest absolute Spearman $R$ with the outcome) from each component cluster. This removes collinearity and reduces the feature space dimensionality.
+#### Scenario 1: Normal Workflow (Two-step Feature Selection + Stratification)
+This is the recommended workflow where you first find a non-redundant gene signature, then pass it to the CATranS pipeline.
 
-### 2. Iterative Semi-Supervised Learning Loop (`_semisupervised_model`)
-- Fits the user-provided model on the known labelled samples using the selected gene signature.
-- Predicts probability scores for all samples.
-- Classifies new samples if their predicted probability exceeds the `model_threshold` (e.g. $\ge 0.8$).
-- Runs a full `pydeseq2` Differential Expression (DE) analysis between the newly relabelled groups.
-- If the number of significant Differentially Expressed Genes (DEGs) increases compared to the previous step, the new labels are kept and a new iteration begins.
-- The iterations stop when no further classification changes occur or when the DE analysis returns no additional DEGs.
+```python
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+import catrans
+
+# 1. Load your transcriptomics and clinical datasets
+counts = pd.read_csv("data/raw_counts.tsv", sep="\t", index_col=0)
+metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
+initial_classes = pd.read_csv("data/initial_classes.tsv", sep="\t", index_col=0)
+
+# 2. Define custom labels: "Survivor" (negative) and "NonSurvivor" (positive)
+my_classes = catrans.CatransClasses(positive="NonSurvivor", negative="Survivor")
+
+# 3. Perform correlation-based feature selection to identify candidate biomarkers
+signature = catrans.correlation_based_feature_selection(
+    data=counts,
+    acute_classification=initial_classes,
+    classes=my_classes,
+    pval=0.05,
+    cutoff_corr=0.5,
+    cutoff_corr_genes=0.8,
+    n_cpus=4
+)
+
+# 4. Run the semi-supervised relabeling pipeline using the selected signature
+results = catrans.run_catrans(
+    raw_counts=counts,
+    metadata=metadata,
+    acute_classification=initial_classes,
+    classes=my_classes,
+    model=RandomForestClassifier(random_state=42),
+    model_threshold=0.75,
+    signature_genes=signature,
+    n_cpus=4
+)
+
+print(results.final_classification)
+```
+
+#### Scenario 2: Predefined/Custom Gene Signature (Direct Stratification)
+If you already have a target gene signature (e.g., from literature or a previous experiment), you can bypass the feature selection step entirely and run the stratification pipeline directly.
+
+```python
+import pandas as pd
+from sklearn.svm import SVC
+import catrans
+
+counts = pd.read_csv("data/raw_counts.tsv", sep="\t", index_col=0)
+metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
+initial_classes = pd.read_csv("data/initial_classes.tsv", sep="\t", index_col=0)
+
+# Custom predefined signature from literature
+custom_signature = ["ENSG00000034693.15", "ENSG00000101188.5", "ENSG00000104870.13"]
+
+# Run the CATranS pipeline directly with the custom signature
+results = catrans.run_catrans(
+    raw_counts=counts,
+    metadata=metadata,
+    acute_classification=initial_classes,
+    model=SVC(probability=True, random_state=42),
+    model_threshold=0.8,
+    signature_genes=custom_signature,
+    n_cpus=4
+)
+
+print(f"Completed in {results.number_of_iterations} iterations.")
+```
+
+#### Scenario 3: Implicit Feature Selection (Defaulting Signature Genes)
+If you do not specify a list of `signature_genes`, `run_catrans` will automatically execute `correlation_based_feature_selection` under the hood using default parameters.
+
+```python
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+import catrans
+
+counts = pd.read_csv("data/raw_counts.tsv", sep="\t", index_col=0)
+metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
+initial_classes = pd.read_csv("data/initial_classes.tsv", sep="\t", index_col=0)
+
+# Run CATranS (it will automatically perform feature selection internally)
+results = catrans.run_catrans(
+    raw_counts=counts,
+    metadata=metadata,
+    acute_classification=initial_classes,
+    model=RandomForestClassifier(random_state=42),
+    model_threshold=0.75,
+    n_cpus=4
+)
+```
+
+#### Scenario 4: Default Thresholds & Core Settings
+You can omit optional arguments like `model_threshold` or `classes` if you wish to use the defaults (`model_threshold=0.8`, `classes` defaulting to `"Dead"`/`"Alive"`).
+
+```python
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+import catrans
+
+counts = pd.read_csv("data/raw_counts.tsv", sep="\t", index_col=0)
+metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
+initial_classes = pd.read_csv("data/initial_classes.tsv", sep="\t", index_col=0)
+
+# Minimal parameters
+results = catrans.run_catrans(
+    raw_counts=counts,
+    metadata=metadata,
+    acute_classification=initial_classes,
+    model=RandomForestClassifier(random_state=42)
+)
+```
+
+#### Scenario 5: Running with Batch Correction
+To normalize and batch-correct raw counts concurrently, specify the name of the batch column in your metadata dataframe:
+
+```python
+results = catrans.run_catrans(
+    raw_counts=counts,
+    metadata=metadata,
+    acute_classification=initial_classes,
+    model=RandomForestClassifier(random_state=42),
+    batch_col="batch"  # ComBat-seq batch effect correction column
+)
+```
 
 ---
 

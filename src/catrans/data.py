@@ -56,17 +56,6 @@ class CatransResult:
     def last_iteration(self) -> _IterationResult:
         return self.iterations[-1]
 
-    # @property
-    # def history(self) -> pd.DataFrame | None:
-    #     if not self.iterations:
-    #         return None
-    #     first_iter = self.iterations[0]
-    #     df = pd.DataFrame(index=first_iter.model_classification_results.index)
-    #     df["prior_classification"] = first_iter.model_classification_results["prior_classification"]
-    #     for iter_res in self.iterations:
-    #         df[f"new_class_{iter_res.iteration}"] = iter_res.model_classification_results["current_classification"]
-    #     return df
-
     def _set_final_classification(self, classification: pd.DataFrame) -> None:      
         self.final_classification = classification
 
