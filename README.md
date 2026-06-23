@@ -17,37 +17,17 @@ Through an iterative, semi-supervised learning approach, CATranS combines data n
 
 ---
 
-## Workflow Overview
-
-```mermaid
-graph TD
-    A[Raw Count Matrix & Metadata] --> B[Data Normalization & Optional ComBat-seq Batch Correction]
-    B --> C[Feature Selection: Spearman Correlation with Labels]
-    C --> D[Graph Construction: Pearson Gene-Gene Network]
-    D --> E[Redundant Feature Compression: Connected Components Vertex Selection]
-    E --> F[Iterative Semi-Supervised Model Training]
-    F --> G[Fit Classifier & Predict Unlabeled Samples]
-    G --> H{Meets Threshold?}
-    H -- Yes --> I[Relabel Samples & Run DESeq2 Differential Expression Analysis]
-    I --> J{Are there new DEGs?}
-    J -- Yes --> F
-    J -- No --> K[Final Output Classifications & Iteration History]
-    H -- No --> K
-```
-
----
-
 ## Installation
 
 We recommend using [uv](https://github.com/astral-sh/uv) or `pip` for rapid virtual environment setup and dependency management.
 
 ```bash
-# Clone the repository
-git clone https://github.com/ruben-canas-ivi/CATranS.git
-cd CATranS
-
-# Install dependencies and the package using uv
-uv sync
+# Install from PyPI with pip (Not available atm)
+pip install catrans 
+# Install from PyPI with uv (Not available atm)
+uv add catrans
+# Install directly from GitHub
+pip install git+https://github.com/ruben-canas-ivi/CATranS.git
 ```
 
 ### Dependencies
@@ -67,23 +47,39 @@ uv sync
 ### Core Classes & Functions
 
 #### 1. `CatransClasses`
-Defines the names of the binary classes.
-- `positive` (default `"Dead"`): The target/case class.
-- `negative` (default `"Alive"`): The reference/control class.
+Defines the names of the binary classes.  
+- `positive` (default `"Positive"`): The target/case class.  
+- `negative` (default `"Negative"`): The reference/control class.  
 
 #### 2. `correlation_based_feature_selection`
-Identifies representative biomarker genes by correlating expression levels with labels, building a gene-gene correlation network, and selecting one representative gene per connected component.
+Identifies representative biomarker genes by correlating expression levels with labels, building a gene-gene correlation network, and selecting one representative gene per connected component.  
+- `data` (pd.DataFrame): Gene-expression matrix (genes x samples).  
+- `acute_classification` (pd.DataFrame): DataFrame with columns ['sample', 'class'] representing the class label for each sample.  
+- `classes` (CatransClasses, Optional): CatransClasses object defining positive and negative labels.  
+- `pval` (float, default `0.05`): P-value threshold for significance when filtering gene-gene correlations.  
+- `cutoff_corr` (float, Optional): Minimum absolute Spearman Rho for including genes in the gene-gene graph. If not passed, this cuttoff will be determined by the Q3 of Spearman Rho absolute values.  
+- `cutoff_corr_genes` (float): Minimum absolute Pearson R for edge inclusion in the graph. If not passed, this cuttoff will be determined by the Q3 of Pearson R absolute values. Bonferroni correction is performed on Gene x Gene correlation results.  
 
 #### 3. `run_catrans`
-Runs the iterative semi-supervised relabeling pipeline.
-- `raw_counts` (pd.DataFrame): Genes (rows) by Samples (columns).
-- `metadata` (pd.DataFrame): Samples (rows) with metadata.
-- `acute_classification` (pd.DataFrame): Samples (rows) with initially known labels under the column `"class"` (unlabeled samples should be `NaN`).
-- `model`: Any Scikit-Learn compatible classifier (e.g. `RandomForestClassifier`, `SVC(probability=True)`).
-- `classes` (CatransClasses, Optional): Custom positive/negative class names.
-- `batch_col` (str, Optional): Metadata column to use for ComBat-seq batch correction.
-- `model_threshold` (float, default `0.8`): Confidence threshold to assign a label.
-- `signature_genes` (list[str], Optional): Genes to use for training the model. If `None`, `correlation_based_feature_selection` runs automatically.
+Runs the iterative semi-supervised relabeling pipeline.  
+- `raw_counts` (pd.DataFrame): Genes (rows) by Samples (columns).  
+- `metadata` (pd.DataFrame): Samples (rows) with metadata.  
+- `acute_classification` (pd.DataFrame): Samples (rows) with initially known labels under the column `"class"` (unlabeled samples should be `NaN`).  
+- `model`: Any Scikit-Learn compatible classifier (e.g. `RandomForestClassifier`, `SVC(probability=True)`).  
+- `classes` (CatransClasses, Optional): Custom positive/negative class names.  
+- `batch_col` (str, Optional): Metadata column to use for ComBat-seq batch correction.  
+- `model_threshold` (float, default `0.8`): Confidence threshold to assign a label.  
+- `signature_genes` (list[str], Optional): Genes to use for training the model. If `None`, `correlation_based_feature_selection` runs automatically with default parameters.  
+
+#### 4. `CatransResult` Object
+The result of `run_catrans` function is a `CatransResult` object, containing the following attributes:  
+- `number_of_iterations`: Number of iterations needed for the algorithm to converge.  
+- `iterations`: List of the iteration results of each cycle the algorithm performed. Each component of the list is a `_IterationResult` object.  
+- `last_iteration`: Equivalent of `CatransResult.iterations[-1]`. The last `_IterationResult` of the algorithm, containing different results:  
+    - `iteration`: Iteration index.  
+    - `differentially_expressed_genes`: Number of DEGs on this iteration.  
+    - `differential_expression_analysis_results`: DEA results for this iteration in DataFrame format.
+    - `model_classification`: Classification results for this iteration in DataFrame format.
 
 ---
 
@@ -112,8 +108,7 @@ signature = catrans.correlation_based_feature_selection(
     classes=my_classes,
     pval=0.05,
     cutoff_corr=0.5,
-    cutoff_corr_genes=0.8,
-    n_cpus=4
+    cutoff_corr_genes=0.8
 )
 
 # 4. Run the semi-supervised relabeling pipeline using the selected signature

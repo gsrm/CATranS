@@ -4,8 +4,8 @@ import pandas as pd
 
 @dataclass
 class CatransClasses:
-    positive: str = "NonSurvivor"
-    negative: str = "Survivor"
+    positive: str = "Positive"
+    negative: str = "Negative"
 
 @dataclass
 class _CatransInput:
