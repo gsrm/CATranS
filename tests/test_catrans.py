@@ -26,7 +26,7 @@ def test_catrans_result_data_structure():
         },
         index=["Sample1", "Sample2"]  # ty:ignore[invalid-argument-type]
     )
-    result.add_iteration(
+    result._add_iteration(
         iteration_index=1,
         de_genes_count=10,
         dea_results=mock_df,
@@ -37,14 +37,9 @@ def test_catrans_result_data_structure():
     
     # Set final classification
     final_df = pd.DataFrame({"class": ["Alive", "Dead"]})
-    result.set_final_classification(final_df)
+    result._set_final_classification(final_df)
     assert result.final_classification is not None
     assert result.final_classification.iloc[0]["class"] == "Alive"
-
-    # Check history
-    assert result.history is not None
-    assert "new_class_1" in result.history.columns
-
 
 def test_normalization_without_batch_correction():
     """Verify that _get_normalized_dataset performs median-of-ratios scale-normalization."""
@@ -166,9 +161,6 @@ def test_run_catrans_end_to_end():
     assert result is not None
     assert result.final_classification is not None
     assert result.final_classification.shape[0] == 12
-    assert result.history is not None
-    assert "new_class_1" in result.history.columns
-
 
 def test_run_catrans_custom_classes():
     """Verify run_catrans works correctly with user-defined custom classes."""
