@@ -8,10 +8,10 @@ from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
 import igraph as ig
 from inmoose.pycombat import pycombat_seq
-from typing import Any
+from typing import Any, cast
 import logging
 
-from catrans.data import _CatransInput, CatransResult
+from catrans.data import _CatransInput, CatransResult, CatransClasses
 from catrans._logging import _get_logger, _setup_internal_logger
 
 logger = _get_logger()
@@ -21,6 +21,7 @@ logger = _get_logger()
 def _diffExpAnalysis(
     data: pd.DataFrame,
     classification: pd.DataFrame,
+    classes: CatransClasses,
     n_cpus: int = 8,
     verbose: bool = False,
     design: str = '~class'
@@ -35,6 +36,7 @@ def _diffExpAnalysis(
         data: Gene-expression counts matrix (genes x samples).
         classification: DataFrame with at least columns ['sample', 'class'] describing
             group assignments for samples. Samples with NA class are ignored.
+        classes: CatransClasses object defining positive and negative labels.
         n_cpus: Number of parallel workers to use for inference.
         verbose: If True, prints progress messages from pydeseq2 internals.
         design: Formula string for DESeq2 design (e.g. '~class').
@@ -45,24 +47,28 @@ def _diffExpAnalysis(
             - dea_res (DataFrame): Full results table from pydeseq2.
     """
 
-    # print(f'The dimensions of data are: {data.shape}\n')
-    # print(f'The dimensions of experimental design are: {ed.shape}\n')
-    # _setup_internal_logger(verbose=verbose)
+    # Filter classification to only include non-NA classes
+    non_na_classification = classification.loc[classification['class'].notna(), :].copy()
 
     # Verify that we have 2 unique classes to run differential expression analysis
-    unique_classes = classification.loc[classification['class'].notna(), 'class'].unique()
+    unique_classes = non_na_classification['class'].unique()
     if len(unique_classes) != 2:
         logger.warning(f"Fewer than 2 unique classes present ({list(unique_classes)}). Cannot perform differential expression.")
         return 0, pd.DataFrame()
-    
+
+    # Convert the class column to categorical with levels [negative, positive] to fix Wald contrast direction
+    non_na_classification['class'] = pd.Categorical(
+        non_na_classification['class'],
+        categories=[classes.negative, classes.positive]
+    )
 
     logger.info("Loading data...")
     logger.info(f"The dimensions of data are: {data.shape}.")
         
     try:
-        dat_c = data.loc[:, classification.loc[classification['class'].notna(),"sample"]]
+        dat_c = data.loc[:, non_na_classification["sample"]]
     except Exception:
-        raise ValueError('Classification must be a dataframe with a column sample and class') # NOTE: change if data structure changes. Or even before, this wasn't working isn't it?
+        raise ValueError('Classification must be a dataframe with a column sample and class')
 
     logger.info(f"The dimensions of classified data are: {dat_c.shape}.")
     
@@ -71,7 +77,7 @@ def _diffExpAnalysis(
     inference = DefaultInference(n_cpus=n_cpus)
     dds = DeseqDataSet(
         counts=dat_c.T,
-        metadata=classification,
+        metadata=non_na_classification,
         design = design,
         refit_cooks = True,
         inference = inference,
@@ -112,7 +118,7 @@ def _diffExpAnalysis(
     # Results
     ds.summary()
     dea_res = ds.results_df
-    logger.debug(f"Differential Expression Analysis results:\n{dea_res.head(20).to_markdown()}")
+    logger.debug(f"Differential Expression Analysis results:\n{dea_res.head(20).to_string()}")
     degs = dea_res.query('padj < 0.05').shape[0]
 
     return degs, dea_res
@@ -153,6 +159,7 @@ def _semisupervised_model(
         acute_classification: pd.DataFrame,
         model: Any,
         threshold: float,
+        classes: CatransClasses,
         design: str = 'class',
         n_cpus: int = 8
         ) -> CatransResult:
@@ -169,6 +176,7 @@ def _semisupervised_model(
     degs, _ = _diffExpAnalysis(
         data = data_raw, 
         classification = acute_classification,
+        classes = classes,
         n_cpus = n_cpus,
         design= "~"+design
     )
@@ -184,7 +192,7 @@ def _semisupervised_model(
         labeled_samples = old_class.dropna().index
         X_tr = data.loc[signature, labeled_samples].T.to_numpy()
         y_tr = old_class.loc[labeled_samples]
-        y_tr = y_tr.map(lambda x: 1 if x == "Dead" else 0).to_numpy()
+        y_tr = y_tr.map(lambda x: 1 if x == classes.positive else 0).to_numpy()
 
         # Train the model and predict
         logger.info("Generating new predictions")
@@ -206,7 +214,7 @@ def _semisupervised_model(
         new_classes['prior_classification'] = old_class
         new_classes.columns = ['negative_class_probability','positive_class_probability', 'prior_classification']
         new_classes['current_classification'] = new_classes.apply(
-             lambda row: 'Alive' if row['negative_class_probability'] >= threshold else ('Dead' if row['positive_class_probability'] > threshold else np.nan),
+             lambda row: classes.negative if row['negative_class_probability'] >= threshold else (classes.positive if row['positive_class_probability'] > threshold else np.nan),
               axis = 1
               )
             
@@ -228,6 +236,7 @@ def _semisupervised_model(
             new_degs, dea_results = _diffExpAnalysis(
                 data = data_raw, 
                 classification = classification,
+                classes = classes,
                 n_cpus = n_cpus,
                 design= "~"+design
             )
@@ -238,7 +247,7 @@ def _semisupervised_model(
             if new_degs > degs:
                 
                 logging.info("All conditions passed, saving iteration result.")
-                results.add_iteration(i, new_degs, dea_results, new_classes)
+                results._add_iteration(i, new_degs, dea_results, new_classes)
                 old_class = new_classes['current_classification']
                 degs = new_degs
             
@@ -255,8 +264,9 @@ def _semisupervised_model(
             signal = False
 
     logger.info("Program ended.")
-    results.set_final_classification(pd.DataFrame(old_class))
-    # results.history = history
+    final_df = pd.DataFrame(old_class)
+    final_df.columns = [design]
+    results._set_final_classification(final_df)
 
 
     return results
@@ -325,6 +335,7 @@ def _get_normalized_dataset(
 def correlation_based_feature_selection(
         data: pd.DataFrame,
         acute_classification: pd.DataFrame,
+        classes: CatransClasses = CatransClasses(),
         pval: float = 0.05,
         cutoff_corr: float | None = None,
         cutoff_corr_genes: float | None = None,
@@ -342,6 +353,7 @@ def correlation_based_feature_selection(
         data: Gene-expression matrix (genes x samples).
         acute_classification: DataFrame with columns ['sample', 'class'] representing
             the class label for each sample.
+        classes: CatransClasses object defining positive and negative labels.
         pval: P-value threshold for significance when filtering gene-gene correlations.
         cutoff_corr: Minimum absolute Spearman R for including genes in the gene-gene graph.
         cutoff_corr_genes: Minimum absolute Pearson R for edge inclusion in the graph.
@@ -360,7 +372,8 @@ def correlation_based_feature_selection(
     dat_c = data.loc[:, classified_samples_acute]
 
     corr_list = []
-    y_class = acute_classification.loc[:, 'class']
+    # Map labels to numeric to ensure scipy spearmanr calculates correctly on consistent numeric values
+    y_class = acute_classification.loc[:, 'class'].map({classes.negative: 0, classes.positive: 1})
     logger.info("Performing correlation between Acute classification and genes expression")
 
     for i in range(dat_c.shape[0]):
@@ -407,9 +420,9 @@ def correlation_based_feature_selection(
     _, corr2['p_adj'], _, _ = multipletests(corr2['p_value'], alpha=0.05, method=pval_correction_method)
     
 
-    if logger.level == logging.DEBUG:
-        corr1.to_csv("corr1.csv", index=False, header = True) # DEBUG
-        corr2.to_csv("corr2.csv", index=False, header = True) # DEBUG
+    # if logger.level == logging.DEBUG:
+        # corr1.to_csv("corr1.csv", index=False, header = True) # DEBUG
+        # corr2.to_csv("corr2.csv", index=False, header = True) # DEBUG
         # corr_2_2.to_csv("corr2_2.csv", index=False, header = True) # DEBUG
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"correlations Gene to Gene Results:\n{corr2.head(n=200).to_string()}")
@@ -459,10 +472,10 @@ def correlation_based_feature_selection(
         selected_genes.append(selected_gene)
        
     corr1_final = corr1.loc[(corr1['Genes'].isin(selected_genes) & (corr1['p_value'] <= pval))] # is pval needed? 
-    logger.debug(corr1_final.to_markdown())
+    logger.debug(corr1_final.to_string())
     logger.info(f"Number of final genes selected: {len(corr1_final)}")
     
-    return corr1_final['Genes'].to_list()
+    return cast(list[str], corr1_final['Genes'].to_list())
 
     
 def run_catrans(
@@ -470,6 +483,7 @@ def run_catrans(
         metadata: pd.DataFrame,
         acute_classification: pd.DataFrame,
         model: Any,
+        classes: CatransClasses | None = None,
         batch_col: str | None = None,
         model_threshold: float = 0.8,
         n_cpus: int = 8,
@@ -479,12 +493,25 @@ def run_catrans(
 
     _setup_internal_logger(verbose=verbose)
 
+    if classes is None:
+        classes = CatransClasses()
+
     # Argument checking
     if not isinstance(acute_classification, pd.DataFrame):
         raise TypeError("acute_classification must be a pandas.DataFrame")
 
     if 'sample' not in acute_classification.columns or 'class' not in acute_classification.columns:
         raise ValueError("acute_classification must be a pandas.DataFrame with 'sample' and 'class' columns.")
+
+    # Validate classes in acute_classification
+    allowed_values = {classes.positive, classes.negative}
+    actual_values = set(acute_classification['class'].dropna().unique())
+    invalid_values = actual_values - allowed_values
+    if invalid_values:
+        raise ValueError(
+            f"Found invalid labels in acute_classification['class']: {invalid_values}. "
+            f"Only '{classes.positive}' (positive) and '{classes.negative}' (negative) are allowed, plus NaN."
+        )
 
     # Create a copy to avoid mutating the caller's DataFrame in-place
     acute_classification = acute_classification.copy()
@@ -504,6 +531,7 @@ def run_catrans(
         signature_genes = correlation_based_feature_selection(
             data=raw_counts,
             acute_classification=acute_classification,
+            classes=classes,
             n_cpus=n_cpus,
             verbose=verbose
         )
@@ -516,6 +544,7 @@ def run_catrans(
         metadata=metadata,
         acute_classification=acute_classification,
         model=model,
+        classes=classes,
         batch_col=batch_col,
         model_threshold=model_threshold,
         n_cpus=n_cpus,
@@ -538,6 +567,7 @@ def run_catrans(
         acute_classification=input_data.acute_classification,
         model=input_data.model,
         threshold=input_data.model_threshold,
+        classes=input_data.classes,
     )
     
     return results
