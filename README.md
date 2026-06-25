@@ -1,8 +1,10 @@
 # CATranS: Clinical Acute Transcriptomic Stratification
 
-**CATranS** is a robust bioinformatics and machine learning pipeline written in Python designed to stratify acute clinical cohorts using transcriptomic count data. 
+![](img/logo.png)  
 
-Through an iterative, semi-supervised learning approach, CATranS combines data normalization, batch correction, correlation-based feature selection, and class prediction to refine classifications of patient cohorts (e.g., separating acute from non-acute states, or predicting survival outcomes).
+**CATranS** is a bioinformatics and machine learning routine written in Python designed to expand classification of samples based on a clinical acute initial labeling using transcriptomic count data. 
+
+Through an iterative, semi-supervised learning approach, CATranS combines data normalization, batch correction, correlation-based feature selection, and class prediction to refine classifications of patient cohorts.
 
 ---
 
