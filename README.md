@@ -46,7 +46,7 @@ pip install git+https://github.com/ruben-canas-ivi/CATranS.git
 
 ### Core Classes & Functions
 
-#### 1. `CatransClasses`
+#### 1. `CatransClasses` Object
 Defines the names of the binary classes.  
 - `positive` (default `"Positive"`): The target/case class.  
 - `negative` (default `"Negative"`): The reference/control class.  
@@ -85,26 +85,49 @@ The result of `run_catrans` function is a `CatransResult` object, containing the
 
 ### Usage Scenarios
 
-#### Scenario 1: Normal Workflow (Two-step Feature Selection + Stratification)
+#### **Scenario 1**: Normal Workflow (Two-step Feature Selection + Stratification)
 This is the recommended workflow where you first find a non-redundant gene signature, then pass it to the CATranS pipeline.
 
 ```python
 import pandas as pd
+import statistics
 from sklearn.ensemble import RandomForestClassifier
 import catrans
 
 # 1. Load your transcriptomics and clinical datasets
 counts = pd.read_csv("data/raw_counts.tsv", sep="\t", index_col=0)
 metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
-initial_classes = pd.read_csv("data/initial_classes.tsv", sep="\t", index_col=0)
 
-# 2. Define custom labels: "Survivor" (negative) and "NonSurvivor" (positive)
+# 2. Define an Acute classification
+## For this example, this classification is based on clinical data only, catching the extreme cases of the condition.
+
+is_survivor = metadata["vital_status"] == "Alive"
+is_non_survivor = metadata["vital_status"] == "Dead
+
+### We use Q3 of 'days_to_last_follow_up' as threshold for Survivors
+threshold_survivor = metadata.loc[is_survivor, "days_to_last_follow_up"].quantile(0.75)
+is_acute_survivor = (metadata['days_to_last_follow_up'] > threshold_survivor) & is_survivor
+## We use Q1 of "days_to_last_follow_up" as threshold for Non-Survivors
+threshold_non_survivor = metadata.loc[is_non_survivor, "days_to_last_follow_up"].quantile(0.25)
+is_acute_non_survivor = (metadata['days_to_last_follow_up'] < threshold_non_survivor) & is_non_survivor
+
+acute_indices = metadata[is_acute_survivor | is_acute_non_survivor].index
+acute_classification = pd.DataFrmae({
+    'Sample' : acute_indices,
+    'Class'  : np.where(is_alive.loc[acute_indices], "Survivor", "NonSurvivor")
+}).set_index('Sample', drop=False)
+acute_classification.index.name = None
+
+## save classification to file
+acute_classification = acute_classification.to_csv("data/acute_classification.tsv", sep="\t", index=True, header=True)
+
+# 3. Define custom labels: "Survivor" (negative) and "NonSurvivor" (positive)
 my_classes = catrans.CatransClasses(positive="NonSurvivor", negative="Survivor")
 
 # 3. Perform correlation-based feature selection to identify candidate biomarkers
 signature = catrans.correlation_based_feature_selection(
     data=counts,
-    acute_classification=initial_classes,
+    acute_classification=acute_classification,
     classes=my_classes,
     pval=0.05,
     cutoff_corr=0.5,
@@ -115,18 +138,50 @@ signature = catrans.correlation_based_feature_selection(
 results = catrans.run_catrans(
     raw_counts=counts,
     metadata=metadata,
-    acute_classification=initial_classes,
+    acute_classification=acute_classification,
     classes=my_classes,
     model=RandomForestClassifier(random_state=42),
     model_threshold=0.75,
     signature_genes=signature,
     n_cpus=4
 )
-
-print(results.final_classification)
 ```
 
-#### Scenario 2: Predefined/Custom Gene Signature (Direct Stratification)
+```python
+## Exploring the results
+print(results.final_classification)
+```
+|              | class       |
+|:-------------|:------------|
+| Sample_1 | nan         
+| Sample_2 | Survivor    
+| Sample_3 | NonSurvivor 
+| Sample_4 | NonSurvivor 
+| Sample_5 | nan         
+| Sample_6 | nan         
+| Sample_7| Survivor    
+| ....         | ...         
+
+
+```python
+## If we would want to explore the DEA results we should inspect the `last_iteration` attribute
+print(results.last_iteration.differential_expression_analysis_results) # pd.DataFrame
+```
+|                    |   baseMean |   log2FoldChange |    lfcSE |       stat |     pvalue |       padj |
+|:-------------------|-----------:|-----------------:|---------:|-----------:|-----------:|-----------:|
+| ENSG00000000003.15 |   4741.28  |       -0.138988  | 0.16687  | -0.83291   | 0.404896   | 0.616775   |
+| ENSG00000000419.13 |   3451.85  |       -0.0107627 | 0.140807 | -0.0764359 | 0.939072   | 0.97293    |
+| ENSG00000000457.14 |    729.99  |        0.199053  | 0.126976 |  1.56764   | 0.116964   | 0.286715   |
+| ENSG00000000460.17 |    546.356 |        0.250599  | 0.173118 |  1.44756   | 0.147739   | 0.331886   |
+| ENSG00000000938.13 |    412.79  |        0.916682  | 0.244193 |  3.75392   | 0.00017409 | 0.00375287 |
+
+```python
+## We can also explore the rest of iteration results if needed on the `iterations` list
+results.iterations
+```
+
+
+#### **Scenario 2**: Predefined/Custom Gene Signature (Direct Stratification)
 If you already have a target gene signature (e.g., from literature or a previous experiment), you can bypass the feature selection step entirely and run the stratification pipeline directly.
 
 ```python
@@ -136,7 +191,7 @@ import catrans
 
 counts = pd.read_csv("data/raw_counts.tsv", sep="\t", index_col=0)
 metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
-initial_classes = pd.read_csv("data/initial_classes.tsv", sep="\t", index_col=0)
+acute_classification = pd.read_csv("data/acute_classification.tsv", sep="\t", index_col=0)
 
 # Custom predefined signature from literature
 custom_signature = ["ENSG00000034693.15", "ENSG00000101188.5", "ENSG00000104870.13"]
@@ -145,17 +200,15 @@ custom_signature = ["ENSG00000034693.15", "ENSG00000101188.5", "ENSG00000104870.
 results = catrans.run_catrans(
     raw_counts=counts,
     metadata=metadata,
-    acute_classification=initial_classes,
+    acute_classification=acute_classification,
     model=SVC(probability=True, random_state=42),
     model_threshold=0.8,
     signature_genes=custom_signature,
     n_cpus=4
 )
-
-print(f"Completed in {results.number_of_iterations} iterations.")
 ```
 
-#### Scenario 3: Implicit Feature Selection (Defaulting Signature Genes)
+#### **Scenario 3**: Implicit Feature Selection (Defaulting Signature Genes)
 If you do not specify a list of `signature_genes`, `run_catrans` will automatically execute `correlation_based_feature_selection` under the hood using default parameters.
 
 ```python
@@ -165,21 +218,21 @@ import catrans
 
 counts = pd.read_csv("data/raw_counts.tsv", sep="\t", index_col=0)
 metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
-initial_classes = pd.read_csv("data/initial_classes.tsv", sep="\t", index_col=0)
+acute_classification = pd.read_csv("data/acute_classification.tsv", sep="\t", index_col=0)
 
 # Run CATranS (it will automatically perform feature selection internally)
 results = catrans.run_catrans(
     raw_counts=counts,
     metadata=metadata,
-    acute_classification=initial_classes,
+    acute_classification=acute_classification,
     model=RandomForestClassifier(random_state=42),
     model_threshold=0.75,
     n_cpus=4
 )
 ```
 
-#### Scenario 4: Default Thresholds & Core Settings
-You can omit optional arguments like `model_threshold` or `classes` if you wish to use the defaults (`model_threshold=0.8`, `classes` defaulting to `"Dead"`/`"Alive"`).
+#### **Scenario 4**: Default Thresholds & Core Settings
+You can omit optional arguments like `model_threshold` or `classes` if you wish to use the defaults (`model_threshold=0.8`, `classes` defaulting to `"Positive"`/`"Negative"`).
 
 ```python
 import pandas as pd
@@ -188,13 +241,13 @@ import catrans
 
 counts = pd.read_csv("data/raw_counts.tsv", sep="\t", index_col=0)
 metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
-initial_classes = pd.read_csv("data/initial_classes.tsv", sep="\t", index_col=0)
+acute_classification = pd.read_csv("data/acute_classification.tsv", sep="\t", index_col=0)
 
 # Minimal parameters
 results = catrans.run_catrans(
     raw_counts=counts,
     metadata=metadata,
-    acute_classification=initial_classes,
+    acute_classification=acute_classification,
     model=RandomForestClassifier(random_state=42)
 )
 ```
@@ -206,27 +259,10 @@ To normalize and batch-correct raw counts concurrently, specify the name of the 
 results = catrans.run_catrans(
     raw_counts=counts,
     metadata=metadata,
-    acute_classification=initial_classes,
+    acute_classification=acute_classification,
     model=RandomForestClassifier(random_state=42),
     batch_col="batch"  # ComBat-seq batch effect correction column
 )
-```
-
----
-
-## Testing & Quality Assurance
-
-CATranS utilizes `pytest` for automated test suites, `ruff` for code style consistency, and `mypy` for strict type checking.
-
-```bash
-# Run tests
-uv run pytest
-
-# Check code format and style
-uv run ruff check .
-
-# Perform static type checks
-uv run mypy src/catrans
 ```
 
 ---
