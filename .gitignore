@@ -5,3 +5,6 @@ uv.lock
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
+dist/
+*.html
+*.ipynb

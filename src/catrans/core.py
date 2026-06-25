@@ -339,7 +339,6 @@ def correlation_based_feature_selection(
         pval: float = 0.05,
         cutoff_corr: float | None = None,
         cutoff_corr_genes: float | None = None,
-        n_cpus: int = 8,
         verbose: bool = False
     ) -> list[str] | None:
     """
@@ -532,7 +531,6 @@ def run_catrans(
             data=raw_counts,
             acute_classification=acute_classification,
             classes=classes,
-            n_cpus=n_cpus,
             verbose=verbose
         )
         
