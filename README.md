@@ -29,7 +29,7 @@ pip install catrans
 # Install from PyPI with uv (Not available atm)
 uv add catrans
 # Install directly from GitHub
-pip install git+https://github.com/ruben-canas-ivi/CATranS.git
+pip install git+https://github.com/gsrm/CATranS.git
 ```
 
 ### Dependencies
