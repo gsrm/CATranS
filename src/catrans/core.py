@@ -1,18 +1,19 @@
 # Load dependencies
-import pandas as pd 
-from scipy import stats
+import logging
+from typing import Any, cast
+
+import igraph as ig
 import numpy as np
-from statsmodels.stats.multitest import multipletests
+import pandas as pd
+from inmoose.pycombat import pycombat_seq
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
 from pydeseq2.ds import DeseqStats
-import igraph as ig
-from inmoose.pycombat import pycombat_seq
-from typing import Any, cast
-import logging
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
 
-from catrans.data import _CatransInput, CatransResult, CatransClasses
 from catrans._logging import _get_logger, _setup_internal_logger
+from catrans.data import CatransClasses, CatransResult, _CatransInput
 
 logger = _get_logger()
 
@@ -53,7 +54,10 @@ def _diffExpAnalysis(
     # Verify that we have 2 unique classes to run differential expression analysis
     unique_classes = non_na_classification['class'].unique()
     if len(unique_classes) != 2:
-        logger.warning(f"Fewer than 2 unique classes present ({list(unique_classes)}). Cannot perform differential expression.")
+        logger.warning(
+            f"Fewer than 2 unique classes present ({list(unique_classes)}). "
+            "Cannot perform differential expression."
+        )
         return 0, pd.DataFrame()
 
     # Convert the class column to categorical with levels [negative, positive] to fix Wald contrast direction
@@ -67,8 +71,8 @@ def _diffExpAnalysis(
         
     try:
         dat_c = data.loc[:, non_na_classification["sample"]]
-    except Exception:
-        raise ValueError('Classification must be a dataframe with a column sample and class')
+    except KeyError as err:
+        raise ValueError('Classification must be a dataframe with a column sample and class') from err
 
     logger.info(f"The dimensions of classified data are: {dat_c.shape}.")
     
@@ -200,30 +204,34 @@ def _semisupervised_model(
         try: 
             model.fit(X_tr, y_tr)
             y_pred = model.predict_proba(data.loc[signature, :].T.to_numpy())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Program has suffered a critical exception: {e}")
             y_pred = None
-        
 
         logger.info("Predictions were successfully performed")
         # Check the prediction
         new_classes = pd.DataFrame(y_pred)
-        
         new_classes.set_index(data.columns, inplace=True)
-        
         new_classes['prior_classification'] = old_class
-        new_classes.columns = ['negative_class_probability','positive_class_probability', 'prior_classification']
+        new_classes.columns = ['negative_class_probability', 'positive_class_probability', 'prior_classification']
         new_classes['current_classification'] = new_classes.apply(
-            lambda row: classes.negative if row['negative_class_probability'] >= threshold else (classes.positive if row['positive_class_probability'] >= threshold else np.nan),
-            axis = 1
-            )
-            
+            lambda row: (
+                classes.negative
+                if row['negative_class_probability'] >= threshold
+                else (classes.positive if row['positive_class_probability'] >= threshold else np.nan)
+            ),
+            axis=1,
+        )
+
         logger.info("Updating classification")
 
-        logger.info(f"The number of unclassified samples in previous iteration is {int(new_classes['prior_classification'].isnull().sum())}")
-        logger.info(f"The number of unclassified samples in current iteration is {int(new_classes['current_classification'].isnull().sum())}")
+        prior_unclass = int(new_classes['prior_classification'].isnull().sum())
+        curr_unclass = int(new_classes['current_classification'].isnull().sum())
+        logger.info(f"The number of unclassified samples in previous iteration is {prior_unclass}")
+        logger.info(f"The number of unclassified samples in current iteration is {curr_unclass}")
         # Stopping criteria
-        if not all(new_classes['prior_classification'] == new_classes['current_classification']) and int(new_classes['prior_classification'].isnull().sum()) > int(new_classes['current_classification'].isnull().sum()):
+        class_changed = not all(new_classes['prior_classification'] == new_classes['current_classification'])
+        if class_changed and prior_unclass > curr_unclass:
             
             # Update results object incrementally
             logger.info("Classification changed; running Differential Expression Analysis...")        
@@ -335,7 +343,7 @@ def _get_normalized_dataset(
 def correlation_based_feature_selection(
         data: pd.DataFrame,
         acute_classification: pd.DataFrame,
-        classes: CatransClasses = CatransClasses(),
+        classes: CatransClasses | None = None,
         pval: float = 0.05,
         cutoff_corr: float | None = None,
         cutoff_corr_genes: float | None = None,
@@ -364,6 +372,10 @@ def correlation_based_feature_selection(
     _setup_internal_logger(verbose)
 
     logger.info("Initializing Correlation-Based Feature Learning")
+
+    # check classes in case of defaulting
+    if classes is None:
+        classes = CatransClasses()
 
     classified_mask = acute_classification['class'].notna()
     classified_samples_acute = acute_classification.loc[classified_mask, 'sample']
@@ -402,7 +414,9 @@ def correlation_based_feature_selection(
 
         logger.warning(f"There are no genes higher than {cutoff_corr}.")
         logger.warning(f"The maximum R value is {np.round(np.max(abs(corr1['rho'])),2)}.") # Fixed typo: 'R' to 'rho'
-        logger.warning("By default the analyses will be performed only with significant correlations (p-value <= 0.05)") 
+        logger.warning(
+            "By default the analyses will be performed only with significant correlations (p-value <= 0.05)"
+        )
 
         corr_genes = corr1[corr1['p_value']<=pval].index.to_list()
 

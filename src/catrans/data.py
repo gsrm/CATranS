@@ -1,6 +1,8 @@
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any
+
 import pandas as pd
+
 
 @dataclass
 class CatransClasses:
@@ -14,10 +16,10 @@ class _CatransInput:
     acute_classification: pd.DataFrame
     model: Any
     classes: CatransClasses
-    batch_col: Optional[str] = None
+    batch_col: str | None = None
     model_threshold: float = 0.8
     n_cpus: int = 8
-    signature_genes: Optional[List[str]] = None
+    signature_genes: list[str] | None = None
 
 @dataclass
 class _IterationResult:
@@ -28,8 +30,8 @@ class _IterationResult:
 
 class CatransResult:
     def __init__(self) -> None:
-        self.iterations: List[_IterationResult] = list()
-        self.final_classification: Optional[pd.DataFrame] = None
+        self.iterations: list[_IterationResult] = []
+        self.final_classification: pd.DataFrame | None = None
 
     def _add_iteration(
             self,

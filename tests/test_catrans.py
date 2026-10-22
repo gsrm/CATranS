@@ -1,17 +1,19 @@
 import logging
+
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 
-from catrans.data import CatransResult, CatransClasses
+from catrans._logging import CustomFormatter
 from catrans.core import (
-    _get_normalized_dataset,
     _diffExpAnalysis,
+    _get_normalized_dataset,
     correlation_based_feature_selection,
     run_catrans,
 )
-from catrans._logging import CustomFormatter
+from catrans.data import CatransClasses, CatransResult
+
 
 def test_catrans_result_data_structure():
     """Verify that the CatransResult container correctly stores iterations and classifications."""
@@ -241,7 +243,7 @@ def test_run_catrans_input_validation():
     model = LogisticRegression()
 
     # 1. acute_classification is not a DataFrame
-    with pytest.raises(TypeError, match="must be a pandas.DataFrame"):
+    with pytest.raises(TypeError, match=r"must be a pandas\.DataFrame"):
         run_catrans(counts, meta, acute_classification="not_a_df", model=model)  # type: ignore[arg-type]
 
     # 2. Missing 'sample' or 'class' column
