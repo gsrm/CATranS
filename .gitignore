@@ -11,3 +11,6 @@ dist/
 *.html
 README_files/
 *.ipynb
+.coverage
+.coverage.*
+htmlcov/

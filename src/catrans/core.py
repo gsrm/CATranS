@@ -240,7 +240,7 @@ def _semisupervised_model(
                 n_cpus = n_cpus,
                 design= "~"+design
             )
-           
+            
             logger.info(f"DEGs on prior iteration: {degs}")
             logger.info(f"DEGs on current iteration: {new_degs}")
             
@@ -365,14 +365,15 @@ def correlation_based_feature_selection(
 
     logger.info("Initializing Correlation-Based Feature Learning")
 
-    classified_samples_acute = acute_classification.loc[acute_classification['class'].notna(), 'sample']
+    classified_mask = acute_classification['class'].notna()
+    classified_samples_acute = acute_classification.loc[classified_mask, 'sample']
 
     # Samples are columns
     dat_c = data.loc[:, classified_samples_acute]
 
     corr_list = []
     # Map labels to numeric to ensure scipy spearmanr calculates correctly on consistent numeric values
-    y_class = acute_classification.loc[:, 'class'].map({classes.negative: 0, classes.positive: 1})
+    y_class = acute_classification.loc[classified_mask, 'class'].map({classes.negative: 0, classes.positive: 1})
     logger.info("Performing correlation between Acute classification and genes expression")
 
     for i in range(dat_c.shape[0]):
@@ -404,6 +405,10 @@ def correlation_based_feature_selection(
         logger.warning("By default the analyses will be performed only with significant correlations (p-value <= 0.05)") 
 
         corr_genes = corr1[corr1['p_value']<=pval].index.to_list()
+
+    if len(corr_genes) <= 1:
+        logger.info(f"Fewer than 2 genes selected ({len(corr_genes)}); skipping gene-gene network reduction.")
+        return cast(list[str], corr_genes)
 
     subdat = dat_c.loc[corr_genes,:]
 
