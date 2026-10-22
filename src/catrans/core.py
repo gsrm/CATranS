@@ -214,7 +214,7 @@ def _semisupervised_model(
         new_classes['prior_classification'] = old_class
         new_classes.columns = ['negative_class_probability','positive_class_probability', 'prior_classification']
         new_classes['current_classification'] = new_classes.apply(
-            lambda row: classes.negative if row['negative_class_probability'] >= threshold else (classes.positive if row['positive_class_probability'] > threshold else np.nan),
+            lambda row: classes.negative if row['negative_class_probability'] >= threshold else (classes.positive if row['positive_class_probability'] >= threshold else np.nan),
             axis = 1
             )
             
