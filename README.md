@@ -11,7 +11,7 @@ Through an iterative, semi-supervised learning approach, CATranS combines data n
 ## Key Features
 
 - **Iterative Semi-Supervised Relabeling**: Safely expands training cohorts by predicting clinical labels on unclassified/unlabeled samples using high-confidence thresholds.
-- **Generalized Custom Classes**: Supports user-defined positive and negative class labeling (e.g., `Survivor`/`NonSurvivor`, `Mild`/`Severe`, `Responders`/`NonResponders`) with robust Categorical ordering to fix Wald contrast directions in DESeq2.
+- **Generalized Custom Classes**: Supports user-defined positive and negative class labeling (e.g., `Survivor`/`NonSurvivor`, `Mild`/`Severe`, `Responders`/`NonResponders`) with robust Categorical ordering to fix contrast directions in DESeq2.
 - **Batch Correction**: Integrated with `inmoose` for ComBat-seq count batch effect correction.
 - **DESeq2-style Normalization**: Leverages the high-performance `pydeseq2` implementation for median-of-ratios normalization.
 - **Correlation-Based Feature Learning**: Custom graph-theory based gene selection utilizing `igraph`. Filters out highly redundant co-expressed genes and selects optimal representative biomarkers correlating with clinical outcomes.
@@ -36,7 +36,7 @@ pip install git+https://github.com/gsrm/CATranS.git
 - Python `>=3.11`
 - `numpy>=2.3.0`
 - `pandas>=2.3.3`
-- `scipy>=1.14.0`
+- `scipy>=1.17.1`
 - `scikit-learn>=1.8.0`
 - `pydeseq2>=0.5.4`
 - `igraph>=1.0.0`
@@ -91,6 +91,7 @@ The result of `run_catrans` function is a `CatransResult` object, containing the
 This is the recommended workflow where you first find a non-redundant gene signature, then pass it to the CATranS pipeline.
 
 ```python
+import numpy as np
 import pandas as pd
 import statistics
 from sklearn.ensemble import RandomForestClassifier
@@ -103,8 +104,8 @@ metadata = pd.read_csv("data/metadata.tsv", sep="\t", index_col=0)
 # 2. Define an Acute classification
 ## For this example, this classification is based on clinical data only, catching the extreme cases of the condition.
 
-is_survivor = metadata["vital_status"] == "Alive"
-is_non_survivor = metadata["vital_status"] == "Dead
+is_survivor = metadata["vital_status"] == "Survivor"
+is_non_survivor = metadata["vital_status"] == "NonSurvivor"
 
 ### We use Q3 of 'days_to_last_follow_up' as threshold for Survivors
 threshold_survivor = metadata.loc[is_survivor, "days_to_last_follow_up"].quantile(0.75)
@@ -114,16 +115,16 @@ threshold_non_survivor = metadata.loc[is_non_survivor, "days_to_last_follow_up"]
 is_acute_non_survivor = (metadata['days_to_last_follow_up'] < threshold_non_survivor) & is_non_survivor
 
 acute_indices = metadata[is_acute_survivor | is_acute_non_survivor].index
-acute_classification = pd.DataFrmae({
-    'Sample' : acute_indices,
-    'Class'  : np.where(is_alive.loc[acute_indices], "Survivor", "NonSurvivor")
-}).set_index('Sample', drop=False)
+acute_classification = pd.DataFrame({
+    'sample' : acute_indices,
+    'class'  : np.where(is_alive.loc[acute_indices], "Survivor", "NonSurvivor")
+}).set_index('sample', drop=False)
 acute_classification.index.name = None
 
 ## save classification to file
 acute_classification = acute_classification.to_csv("data/acute_classification.tsv", sep="\t", index=True, header=True)
 
-# 3. Define custom labels: "Survivor" (negative) and "NonSurvivor" (positive)
+# Define custom labels: "Survivor" (negative) and "NonSurvivor" (positive)
 my_classes = catrans.CatransClasses(positive="NonSurvivor", negative="Survivor")
 
 # 3. Perform correlation-based feature selection to identify candidate biomarkers

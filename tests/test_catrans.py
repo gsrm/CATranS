@@ -94,9 +94,11 @@ def test_correlation_based_feature_selection():
     # We expect Gene0 and Gene1 to be highly correlated with label and co-expressed.
     # Therefore, graph connected components should group them and select only ONE representative gene,
     # while Gene2 is ignored or discarded due to lack of label correlation or p-value filtering.
+    classes = CatransClasses(positive="Dead", negative="Alive")
     selected = correlation_based_feature_selection(
         data=counts,
         acute_classification=acute_classification,
+        classes=classes,
         pval=0.05,
         cutoff_corr=0.6,
         cutoff_corr_genes=0.8
@@ -146,11 +148,13 @@ def test_run_catrans_end_to_end():
     # Provide predefined signature genes to bypass feature selection for speed/determinism
     signature = ["Gene_0", "Gene_1", "Gene_2"]
     
+    classes = CatransClasses(positive="Dead", negative="Alive")
     result = run_catrans(
         raw_counts=raw_counts,
         metadata=metadata,
         acute_classification=acute_classification,
         model=model,
+        classes=classes,
         batch_col="batch",
         model_threshold=0.5,
         n_cpus=1,

@@ -214,9 +214,9 @@ def _semisupervised_model(
         new_classes['prior_classification'] = old_class
         new_classes.columns = ['negative_class_probability','positive_class_probability', 'prior_classification']
         new_classes['current_classification'] = new_classes.apply(
-             lambda row: classes.negative if row['negative_class_probability'] >= threshold else (classes.positive if row['positive_class_probability'] > threshold else np.nan),
-              axis = 1
-              )
+            lambda row: classes.negative if row['negative_class_probability'] >= threshold else (classes.positive if row['positive_class_probability'] > threshold else np.nan),
+            axis = 1
+            )
             
         logger.info("Updating classification")
 
@@ -246,20 +246,20 @@ def _semisupervised_model(
             
             if new_degs > degs:
                 
-                logging.info("All conditions passed, saving iteration result.")
+                logger.info("All conditions passed, saving iteration result.")
                 results._add_iteration(i, new_degs, dea_results, new_classes)
                 old_class = new_classes['current_classification']
                 degs = new_degs
             
             else:
                 logger.info("Stopping condition met: no more DEGs discovered than in previous step.")
-                logging.info("Results of this iteration will not be saved.")
+                logger.info("Results of this iteration will not be saved.")
                 
                 signal = False
             
         else:
             logger.info("Stopping condition met: No changes in classification or no new samples classified.")
-            logging.info("Results of this iteration will not be saved.")
+            logger.info("Results of this iteration will not be saved.")
             
             signal = False
 
@@ -311,7 +311,7 @@ def _get_normalized_dataset(
     dds = DeseqDataSet(
         counts=pd.DataFrame(data_for_dds), # pd.df just to shut up pylance error
         metadata=metadata_df,
-        design_factors='1',
+        design='~1',
         inference=inference,
         quiet=True
     )   
