@@ -93,7 +93,6 @@ This is the recommended workflow where you first find a non-redundant gene signa
 ```python
 import numpy as np
 import pandas as pd
-import statistics
 from sklearn.ensemble import RandomForestClassifier
 import catrans
 
@@ -117,12 +116,12 @@ is_acute_non_survivor = (metadata['days_to_last_follow_up'] < threshold_non_surv
 acute_indices = metadata[is_acute_survivor | is_acute_non_survivor].index
 acute_classification = pd.DataFrame({
     'sample' : acute_indices,
-    'class'  : np.where(is_alive.loc[acute_indices], "Survivor", "NonSurvivor")
+    'class'  : np.where(is_survivor.loc[acute_indices], "Survivor", "NonSurvivor")
 }).set_index('sample', drop=False)
 acute_classification.index.name = None
 
 ## save classification to file
-acute_classification = acute_classification.to_csv("data/acute_classification.tsv", sep="\t", index=True, header=True)
+acute_classification.to_csv("data/acute_classification.tsv", sep="\t", index=True, header=True)
 
 # Define custom labels: "Survivor" (negative) and "NonSurvivor" (positive)
 my_classes = catrans.CatransClasses(positive="NonSurvivor", negative="Survivor")
