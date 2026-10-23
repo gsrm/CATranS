@@ -52,11 +52,13 @@ def test_normalization_without_batch_correction():
     """Verify that _get_normalized_dataset performs median-of-ratios scale-normalization."""
     # 5 genes, 4 samples
     counts = pd.DataFrame(
-        [[10, 20, 15, 30],
-         [5, 10, 8, 12],
-         [100, 200, 150, 280],
-         [2, 4, 3, 5],
-         [0, 1, 0, 2]],
+        [
+            [10, 20, 15, 30],
+            [5, 10, 8, 12],
+            [100, 200, 150, 280],
+            [2, 4, 3, 5],
+            [0, 1, 0, 2]
+        ],
         index=[f"Gene{i}" for i in range(5)], # ty:ignore[invalid-argument-type]
         columns=[f"Sample{i}" for i in range(4)] # ty:ignore[invalid-argument-type]
     )
@@ -397,9 +399,11 @@ def test_correlation_based_feature_selection_debug_logging():
         genes = ["Gene_0", "Gene_1", "Gene_2"]
         samples = [f"Sample_{j}" for j in range(8)]
         counts = pd.DataFrame(
-            [[5, 6, 5, 4, 50, 48, 52, 50],
-             [4, 5, 5, 5, 49, 50, 51, 48],
-             [10, 40, 2, 80, 5, 12, 90, 1]],
+            [
+                [5, 6, 5, 4, 50, 48, 52, 50],
+                [4, 5, 5, 5, 49, 50, 51, 48],
+                [10, 40, 2, 80, 5, 12, 90, 1]
+            ],
             index=genes,
             columns=samples
         )
