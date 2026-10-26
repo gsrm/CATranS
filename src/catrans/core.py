@@ -24,28 +24,32 @@ def _diffExpAnalysis(
     classification: pd.DataFrame,
     classes: CatransClasses,
     n_cpus: int = 8,
-    verbose: bool = False,
-    design: str = '~class'
+    design: str = '~class',
+    verbose: bool = False
     ) -> tuple[int, pd.DataFrame]:
     """
-    Run differential expression analysis using DESeq2-like workflow.
+    Run differential expression analysis using a DESeq2 workflow via PyDESeq2.
 
-    This function wraps pydeseq2's `DeseqDataSet` and `DeseqStats` to compute
-    differential expression between groups in `classification`.
+    This function wraps PyDESeq2's `DeseqDataSet` and `DeseqStats` to compute negative
+    binomial dispersion estimates and perform Wald testing between the positive and
+    negative classes. Samples with NA or missing class labels are automatically filtered
+    out prior to model fitting.
 
     Parameters:
-        data: Gene-expression counts matrix (genes x samples).
+        data: Gene-expression raw counts matrix of shape (genes x samples).
         classification: DataFrame with at least columns ['sample', 'class'] describing
             group assignments for samples. Samples with NA class are ignored.
-        classes: CatransClasses object defining positive and negative labels.
-        n_cpus: Number of parallel workers to use for inference.
-        verbose: If True, prints progress messages from pydeseq2 internals.
-        design: Formula string for DESeq2 design (e.g. '~class').
+        classes: CatransClasses instance defining positive and negative condition labels.
+        n_cpus: Number of parallel CPU workers to use for PyDESeq2 dispersion fitting.
+        design: Design formula string for DESeq2 (default: '~class').
+        verbose: If True, prints progress and diagnostic messages from PyDESeq2 internals.
 
     Returns:
-        tuple:
-            - degs (int): Number of differentially expressed genes (padj < 0.05).
-            - dea_res (DataFrame): Full results table from pydeseq2.
+        tuple[int, pd.DataFrame]:
+            - degs (int): Number of statistically significant differentially expressed
+              genes with adjusted p-value (padj) < 0.05.
+            - dea_res (pd.DataFrame): Complete differential expression statistics table
+              from PyDESeq2 containing baseMean, log2FoldChange, lfcSE, stat, pvalue, and padj.
     """
 
     # Filter classification to only include non-NA classes
@@ -130,7 +134,24 @@ def _diffExpAnalysis(
 
 def _correlation_of_gene_tuples(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculate pairwise Pearson correlations and p-values for features (columns) in a DataFrame.
+    Calculate pairwise Pearson correlations and parametric p-values for candidate gene pairs.
+
+    Computes all pairwise Pearson correlation coefficients (r) between candidate genes across
+    samples, and calculates two-tailed p-values using Student's t-distribution with degrees
+    of freedom df = n - 2. Self-correlations and redundant reciprocal pairs (e.g. Gene A - Gene B
+    vs. Gene B - Gene A) are excluded by selecting only the upper triangle of the correlation matrix.
+
+    Parameters:
+        df: Expression matrix of shape (n_samples, n_candidate_genes), where columns represent
+            candidate gene identifiers and rows represent individual biological samples.
+
+    Returns:
+        pd.DataFrame: Table of unique pairwise gene correlations with columns:
+            - 'Gene1' (str): Identifier of the first gene in the pair.
+            - 'Gene2' (str): Identifier of the second gene in the pair.
+            - 'R' (float): Pearson correlation coefficient between Gene1 and Gene2.
+            - 'p_value' (float): Two-tailed parametric p-value testing the null hypothesis
+               that the true correlation is zero.
     """
 
     # Calculate Pearson correlation (r)
@@ -168,8 +189,35 @@ def _semisupervised_model(
         n_cpus: int = 8
         ) -> CatransResult:
     """
-    Run an iterative semi-supervised model to relabel samples and re-run DE analysis.
-    Returns a `CatransResult` object containing iterations and classification history.
+    Execute the iterative semi-supervised self-training loop to refine sample stratification.
+
+    This function trains a probabilistic supervised classifier on currently labeled samples
+    using normalized expression values of the selected biomarker signature. It predicts class
+    probabilities for all samples (including unlabeled / intermediate cases), relabels samples
+    whose posterior class probability meets or exceeds `threshold`, and performs Differential
+    Expression Analysis (DEA) with PyDESeq2 using the raw count matrix on the newly classified cohorts.
+
+    Parameters:
+        data_raw: Unnormalized integer count matrix of shape (genes x samples) used strictly
+            for negative binomial dispersion fitting and differential expression analysis in PyDESeq2.
+        data: Normalized (and optionally batch-corrected) expression matrix of shape (genes x samples)
+            used as feature input for model training and prediction.
+        signature: List of gene identifiers forming the non-redundant predictive signature.
+        acute_classification: DataFrame indexed by sample identifier containing initial class
+            assignments in the column specified by `design`. Intermediate/unclassified samples
+            should contain NaN.
+        model: Supervised classifier instance implementing scikit-learn compatible `fit(X, y)`
+            and `predict_proba(X)` methods.
+        threshold: Minimum posterior probability cutoff (e.g. 0.8) required to assign an
+            unclassified sample to either the positive or negative class.
+        classes: CatransClasses instance defining positive and negative condition labels.
+        design: Column name in `acute_classification` representing condition labels (default: 'class').
+        n_cpus: Number of parallel CPU workers to use for PyDESeq2 computations.
+
+    Returns:
+        CatransResult: Results container storing the sequential history of all successful
+            iterations (iteration index, DEG counts, full PyDESeq2 tables, prediction probabilities)
+            and the final sample classification.
     """
 
     results = CatransResult()
@@ -184,7 +232,6 @@ def _semisupervised_model(
         n_cpus = n_cpus,
         design= "~"+design
     )
-
 
     while signal:
 
@@ -227,8 +274,10 @@ def _semisupervised_model(
 
         prior_unclass = int(new_classes['prior_classification'].isnull().sum())
         curr_unclass = int(new_classes['current_classification'].isnull().sum())
+
         logger.info(f"The number of unclassified samples in previous iteration is {prior_unclass}")
         logger.info(f"The number of unclassified samples in current iteration is {curr_unclass}")
+
         # Stopping criteria
         class_changed = not all(new_classes['prior_classification'] == new_classes['current_classification'])
         if class_changed and prior_unclass > curr_unclass:
@@ -287,19 +336,24 @@ def _get_normalized_dataset(
     log_transform: bool = True,
     ) -> pd.DataFrame:
     """
-    Normalize and batch-correct count data for downstream modeling.
+    Normalize raw RNA-seq counts and optionally adjust for technical batch effects.
 
-    This function applies ComBat-seq batch correction on raw counts and then
-    uses pydeseq2 to compute normalized counts, optionally applying log1p.
+    When `batch_col` is provided, raw counts are adjusted for known technical batch effects
+    using ComBat-seq (`pycombat_seq`). Median-of-ratios size factor estimation is then performed
+    via PyDESeq2's `DeseqDataSet`, scaling counts across samples. Finally, an optional natural
+    logarithmic transformation ln(1 + x) (`np.log1p`) is applied to stabilize variance for
+    downstream machine learning models.
 
     Parameters:
-        counts_df: Raw count matrix (genes x samples).
-        metadata_df: Sample metadata containing at least 'sample' and batch column.
-        batch_col: Column name in metadata specifying batch assignments.
-        log_transform: If True, apply log1p to normalized counts.
+        counts_df: Raw integer count matrix of shape (genes x samples).
+        metadata_df: Sample metadata DataFrame containing sample identifiers and batch annotations.
+        batch_col: Column name in `metadata_df` identifying the batch/run variable. If None,
+            batch correction is skipped and counts are normalized directly.
+        log_transform: If True (default), applies ln(1 + x) transformation to normalized counts.
 
     Returns:
-        DataFrame of normalized (and optionally log-transformed) counts.
+        pd.DataFrame: Normalized (and optionally log-transformed) expression matrix of shape
+            (genes x samples), preserving original gene and sample labels.
     """
     logger.info("Performing Data Normalization")
 
@@ -307,7 +361,7 @@ def _get_normalized_dataset(
         logger.info(f"Batch column input: {batch_col}")        
         logger.info("Performing batch correction")
         # pycombat expects (genes x samples)
-        batch = metadata_df[batch_col].tolist()
+        batch = metadata_df[batch_col].to_list()
         data_for_dds = pycombat_seq(counts_df, batch).T
     else:
         logger.info("No batch column input")
@@ -317,7 +371,7 @@ def _get_normalized_dataset(
 
     inference = DefaultInference(n_cpus=1) 
     dds = DeseqDataSet(
-        counts=pd.DataFrame(data_for_dds), # pd.df just to shut up pylance error
+        counts=pd.DataFrame(data_for_dds),
         metadata=metadata_df,
         design='~1',
         inference=inference,
@@ -350,23 +404,33 @@ def correlation_based_feature_selection(
         verbose: bool = False
     ) -> list[str] | None:
     """
-    Find gene-gene correlation and select representative features.
+    Perform correlation-based feature selection to extract a non-redundant biomarker signature.
 
-    This function computes gene-wise Spearman correlation against the class label,
-    then builds an undirected graph of highly correlated genes and selects a
-    representative gene per connected component.
+    Identifies candidate genes significantly correlated with the acute clinical phenotype,
+    then builds an undirected graph where nodes represent candidate genes and edges denote high
+    pairwise correlation (Pearson |r| >= `cutoff_corr_genes`). For each connected component in
+    the graph, the gene exhibiting the highest correlation with the phenotype is selected as the
+    component's representative, effectively removing collinearity and redundancy.
 
     Parameters:
-        data: Gene-expression matrix (genes x samples).
-        acute_classification: DataFrame with columns ['sample', 'class'] representing
-            the class label for each sample.
-        classes: CatransClasses object defining positive and negative labels.
-        pval: P-value threshold for significance when filtering gene-gene correlations.
-        cutoff_corr: Minimum absolute Spearman R for including genes in the gene-gene graph.
-        cutoff_corr_genes: Minimum absolute Pearson R for edge inclusion in the graph.
+        data: Gene-expression matrix of shape (genes x samples).
+        acute_classification: DataFrame with columns ['sample', 'class'] representing the binary
+            phenotype assignments. Intermediate or unclassified samples (NaN) are ignored.
+        classes: CatransClasses instance defining positive and negative condition labels.
+            If None, defaults to Positive="Positive" and Negative="Negative".
+        pval: Significance threshold for FDR-adjusted (Benjamini-Hochberg) p-values when
+            filtering candidate phenotype-correlated genes (default: 0.05).
+        cutoff_corr: Minimum absolute Spearman correlation coefficient (|r|) with the class label
+            required for candidate gene selection. If None, defaults to the 90th percentile of
+            absolute correlations across all genes.
+        cutoff_corr_genes: Minimum absolute Pearson correlation coefficient (|r|) between candidate
+            genes to establish an edge in the de-redundancy graph. If None, defaults to the 95th
+            percentile of pairwise gene correlations.
+        verbose: If True, enables detailed log messages during the feature selection process.
 
     Returns:
-        DataFrame with selected genes and their correlation statistics.
+        list[str] | None: List of selected non-redundant gene identifiers, or None if no candidate
+            genes meet the correlation and significance thresholds.
     """
 
     _setup_internal_logger(verbose)
@@ -508,6 +572,56 @@ def run_catrans(
         signature_genes: list[str] | None = None,
         verbose: bool = False
     ) -> CatransResult:
+    """
+    Run the complete CATranS (Clinical Acute Transcriptomic Stratification) pipeline.
+
+    CATranS implements an iterative semi-supervised learning framework to refine clinical sample
+    stratification. Starting from a core subset of extreme "acute" cases (e.g. extreme survivors
+    vs. non-survivors), it iteratively predicts class probabilities for intermediate or unclassified
+    samples using a supervised machine learning model. High-confidence predictions are pseudo-labeled,
+    and each iteration is biologically validated by performing differential expression analysis
+    (PyDESeq2) on raw counts to ensure the transcriptional contrast between cohorts strictly increases.
+
+    Workflow:
+        1. Validate input types, DataFrame schemas ('sample', 'class'), and model capabilities.
+        2. If `signature_genes` is not provided, perform correlation-based feature selection
+           (`correlation_based_feature_selection`) to identify a non-redundant biomarker signature.
+        3. Normalize expression counts using PyDESeq2 median-of-ratios scaling and optionally
+           correct technical batch effects using ComBat-seq (`_get_normalized_dataset`).
+        4. Execute iterative self-training (`_semisupervised_model`) until convergence or until
+           differential expression power ceases to improve.
+
+    Parameters:
+        raw_counts: Raw integer read count matrix of shape (genes x samples).
+        metadata: Sample metadata DataFrame containing sample identifiers and optional batch covariates.
+        acute_classification: DataFrame with required columns ['sample', 'class'] specifying initial
+            acute phenotype assignments. Intermediate or unclassified samples must contain NaN in 'class'.
+        model: Supervised classification model instance implementing scikit-learn compatible `fit(X, y)`
+            and `predict_proba(X)` methods (e.g. `RandomForestClassifier`, `LogisticRegression`).
+        classes: CatransClasses instance defining the positive and negative label strings.
+            If None, defaults to Positive="Positive" and Negative="Negative".
+        batch_col: Optional column name in `metadata` specifying technical batches for ComBat-seq correction.
+        model_threshold: Posterior probability cutoff (0.5 < threshold <= 1.0) required to relabel an
+            unclassified sample during self-training iterations (default: 0.8).
+        n_cpus: Number of parallel CPU workers to use for PyDESeq2 dispersion fitting (default: 8).
+        signature_genes: Optional pre-selected list of gene identifiers to use as predictive features.
+            If None, feature selection is performed automatically using default parameters.
+        verbose: If True, enables detailed progress and diagnostic logging to standard output.
+
+    Returns:
+        CatransResult: Results object containing:
+            - `iterations`: List of `_IterationResult` objects tracking DEA tables, DEG counts,
+              and model prediction probabilities for every successful iteration.
+            - `final_classification`: DataFrame containing the final converged sample assignments.
+            - `number_of_iterations`: Total count of successful relabeling iterations performed.
+            - `last_iteration`: Shortcut to the final iteration's results.
+
+    Raises:
+        TypeError: If `acute_classification` is not a pandas DataFrame.
+        ValueError: If `acute_classification` lacks 'sample' or 'class' columns, or contains
+            labels other than `classes.positive`, `classes.negative`, or NaN.
+        AttributeError: If `model` lacks a `predict_proba` method.
+    """
 
     _setup_internal_logger(verbose=verbose)
 
