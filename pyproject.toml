@@ -1,6 +1,6 @@
 [project]
 name = "CATranS"
-version = "0.1.0"
+version = "0.1.1"
 description = "Clinical Acute Transcriptomic Stratification"
 authors = [
     { name = "Patricia Sebastián-León", email = "patricia.sebastian@ivirma.com" },
