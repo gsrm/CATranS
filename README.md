@@ -25,9 +25,9 @@ We recommend using [uv](https://github.com/astral-sh/uv) or `pip` for rapid virt
 
 ```bash
 # Install from PyPI with pip
-pip install catrans 
+pip install CATranS 
 # Install from PyPI with uv
-uv add catrans
+uv add CATranS
 # Install directly from GitHub
 pip install git+https://github.com/gsrm/CATranS.git
 ```
