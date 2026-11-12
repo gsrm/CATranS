@@ -24,9 +24,9 @@ Through an iterative, semi-supervised learning approach, CATranS combines data n
 We recommend using [uv](https://github.com/astral-sh/uv) or `pip` for rapid virtual environment setup and dependency management.
 
 ```bash
-# Install from PyPI with pip (Not available atm)
+# Install from PyPI with pip
 pip install catrans 
-# Install from PyPI with uv (Not available atm)
+# Install from PyPI with uv
 uv add catrans
 # Install directly from GitHub
 pip install git+https://github.com/gsrm/CATranS.git
