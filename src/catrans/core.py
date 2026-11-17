@@ -222,7 +222,10 @@ def _semisupervised_model(
 
     results = CatransResult()
     signal = True
-    old_class = acute_classification[design]
+    # Reassure typing on classification data
+    old_class = acute_classification[design].astype(object)
+    old_class = old_class.fillna(np.nan) 
+
     i = 0
     # baseline for degs; this way we can infer if classifications are indeed "better" than the initial classification.
     degs, _ = _diffExpAnalysis(
@@ -272,15 +275,23 @@ def _semisupervised_model(
 
         logger.info("Updating classification")
 
-        prior_unclass = int(new_classes['prior_classification'].isnull().sum())
-        curr_unclass = int(new_classes['current_classification'].isnull().sum())
+        n_prior_unclassified = int(new_classes['prior_classification'].isnull().sum())
+        n_current_unclassified = int(new_classes['current_classification'].isnull().sum())
 
-        logger.info(f"The number of unclassified samples in previous iteration is {prior_unclass}")
-        logger.info(f"The number of unclassified samples in current iteration is {curr_unclass}")
+        logger.info(f"The number of unclassified samples in previous iteration is {n_prior_unclassified}")
+        logger.info(f"The number of unclassified samples in current iteration is {n_current_unclassified}")
 
         # Stopping criteria
-        class_changed = not all(new_classes['prior_classification'] == new_classes['current_classification'])
-        if class_changed and prior_unclass > curr_unclass:
+
+        same_class_comparisons = (
+            # Labelled classes are equal
+            (new_classes['prior_classification'] == new_classes['current_classification']) |
+            # NAs are equal on both pd.Series
+            (new_classes['prior_classification'].isna() & new_classes['current_classification'].isna())     
+        )
+
+        class_changed = not bool(same_class_comparisons.all())
+        if class_changed and n_prior_unclassified > n_current_unclassified:
             
             # Update results object incrementally
             logger.info("Classification changed; running Differential Expression Analysis...")        
@@ -647,6 +658,9 @@ def run_catrans(
 
     # Create a copy to avoid mutating the caller's DataFrame in-place
     acute_classification = acute_classification.copy()
+    # Reassure typing on class column
+    acute_classification['class'] = acute_classification['class'].astype(object)
+    acute_classification.loc[acute_classification['class'].isna(), 'class'] = np.nan
 
     acute_classification.set_index(
         pd.Index(acute_classification['sample'].to_list()),
