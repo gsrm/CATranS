@@ -436,3 +436,49 @@ def test_run_catrans_feature_selection_failure(monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(ValueError, match="Feature selection failed to produce a gene signature"):
         run_catrans(counts, meta, acute, model=LogisticRegression(), signature_genes=None)
 
+
+def test_run_catrans_string_dtype_partial_samples():
+    """Verify run_catrans handles acute_classification with StringDtype and partial samples."""
+    np.random.seed(42)
+    genes = [f"Gene_{i}" for i in range(5)]
+    samples = [f"Sample_{j}" for j in range(12)]
+    
+    gene0_counts = [5, 6, 5, 500, 480, 520, 5, 6, 5, 500, 480, 520]
+    gene1_counts = [4, 5, 5, 490, 500, 510, 4, 5, 5, 490, 500, 510]
+    gene2_counts = [10, 40, 2, 80, 5, 12, 90, 1, 15, 35, 8, 70]
+    gene3_counts = [15, 20, 8, 30, 2, 11, 45, 3, 25, 40, 12, 60]
+    gene4_counts = [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+    
+    raw_counts = pd.DataFrame(
+        [gene0_counts, gene1_counts, gene2_counts, gene3_counts, gene4_counts],
+        index=genes,
+        columns=samples
+    )
+    metadata = pd.DataFrame({"sample": samples, "batch": ["A"] * 6 + ["B"] * 6}, index=samples)
+    
+    # Input has string dtype and only contains the classified subset (6 out of 12 samples)
+    acute_classification = pd.DataFrame({
+        "sample": samples[:6],
+        "class": pd.Series(["Mild"] * 3 + ["Severe"] * 3, dtype="string")
+    })
+    
+    classes = CatransClasses(positive="Severe", negative="Mild")
+    result = run_catrans(
+        raw_counts=raw_counts,
+        metadata=metadata,
+        acute_classification=acute_classification,
+        model=LogisticRegression(random_state=42),
+        classes=classes,
+        batch_col="batch",
+        model_threshold=0.75,
+        signature_genes=["Gene_0", "Gene_1", "Gene_2"],
+        n_cpus=1
+    )
+    assert result is not None
+    assert result.final_classification is not None
+    assert result.final_classification.shape[0] == 12
+    final_classes = set(result.final_classification["class"].dropna().unique())
+    assert final_classes.issubset({"Severe", "Mild"})
+
+
+
